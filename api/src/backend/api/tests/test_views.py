@@ -3,17 +3,20 @@ import io
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import jwt
 import pytest
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import ClientError, NoCredentialsError
 from conftest import API_JSON_CONTENT_TYPE, TEST_PASSWORD, TEST_USER
 from django.conf import settings
 from django.urls import reverse
 from rest_framework import status
 
+from api.compliance import get_compliance_frameworks
 from api.models import (
+    ComplianceOverview,
+    Integration,
     Invitation,
     Membership,
     Provider,
@@ -37,6 +40,14 @@ def today_after_n_days(n_days: int) -> str:
     return datetime.strftime(
         datetime.today().date() + timedelta(days=n_days), "%Y-%m-%d"
     )
+
+
+class TestViewSet:
+    def test_security_headers(self, client):
+        response = client.get("/")
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
 
 
 @pytest.mark.django_db
@@ -2200,9 +2211,12 @@ class TestScanViewSet:
         dummy_task.id = "dummy-task-id"
         dummy_task_data = {"id": dummy_task.id, "state": StateChoices.EXECUTING}
 
-        with patch("api.v1.views.Task.objects.get", return_value=dummy_task), patch(
-            "api.v1.views.TaskSerializer",
-            return_value=type("DummySerializer", (), {"data": dummy_task_data}),
+        with (
+            patch("api.v1.views.Task.objects.get", return_value=dummy_task),
+            patch(
+                "api.v1.views.TaskSerializer",
+                return_value=type("DummySerializer", (), {"data": dummy_task_data}),
+            ),
         ):
             url = reverse("scan-report", kwargs={"pk": scan.id})
             response = authenticated_client.get(url)
@@ -2264,7 +2278,8 @@ class TestScanViewSet:
         scan.save()
 
         monkeypatch.setattr(
-            "api.v1.views.env", type("env", (), {"str": lambda self, key: bucket})()
+            "api.v1.views.env",
+            type("env", (), {"str": lambda self, *args, **kwargs: "test-bucket"})(),
         )
 
         class FakeS3Client:
@@ -2283,6 +2298,25 @@ class TestScanViewSet:
         assert content_disposition.startswith('attachment; filename="')
         assert f'filename="{expected_filename}"' in content_disposition
         assert response.content == b"s3 zip content"
+
+    def test_report_s3_success_no_local_files(
+        self, authenticated_client, scans_fixture, monkeypatch
+    ):
+        """
+        When output_location is a local path and glob.glob returns an empty list,
+        the view should return HTTP 404 with detail "The scan has no reports."
+        """
+        scan = scans_fixture[0]
+        scan.output_location = "/tmp/nonexistent_report_pattern.zip"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+        monkeypatch.setattr("api.v1.views.glob.glob", lambda pattern: [])
+
+        url = reverse("scan-report", kwargs={"pk": scan.id})
+        response = authenticated_client.get(url)
+
+        assert response.status_code == 404
+        assert response.json()["errors"]["detail"] == "The scan has no reports."
 
     def test_report_local_file(
         self, authenticated_client, scans_fixture, tmp_path, monkeypatch
@@ -2313,6 +2347,263 @@ class TestScanViewSet:
         content_disposition = response.get("Content-Disposition")
         assert content_disposition.startswith('attachment; filename="')
         assert f'filename="{file_path.name}"' in content_disposition
+
+    def test_compliance_invalid_framework(self, authenticated_client, scans_fixture):
+        scan = scans_fixture[0]
+        scan.state = StateChoices.COMPLETED
+        scan.output_location = "dummy"
+        scan.save()
+
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": "invalid"})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert resp.json()["errors"]["detail"] == "Compliance 'invalid' not found."
+
+    def test_compliance_executing(
+        self, authenticated_client, scans_fixture, monkeypatch
+    ):
+        scan = scans_fixture[0]
+        scan.state = StateChoices.EXECUTING
+        scan.save()
+        task = Task.objects.create(tenant_id=scan.tenant_id)
+        scan.task = task
+        scan.save()
+        dummy = {"id": str(task.id), "state": StateChoices.EXECUTING}
+
+        monkeypatch.setattr(
+            "api.v1.views.TaskSerializer",
+            lambda *args, **kwargs: type("S", (), {"data": dummy}),
+        )
+
+        framework = get_compliance_frameworks(scan.provider.provider)[0]
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": framework})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_202_ACCEPTED
+        assert "Content-Location" in resp
+        assert dummy["id"] in resp["Content-Location"]
+
+    def test_compliance_no_output(self, authenticated_client, scans_fixture):
+        scan = scans_fixture[0]
+        scan.state = StateChoices.COMPLETED
+        scan.output_location = ""
+        scan.save()
+
+        framework = get_compliance_frameworks(scan.provider.provider)[0]
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": framework})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert resp.json()["errors"]["detail"] == "The scan has no reports."
+
+    def test_compliance_s3_no_credentials(
+        self, authenticated_client, scans_fixture, monkeypatch
+    ):
+        scan = scans_fixture[0]
+        bucket = "bucket"
+        key = "file.zip"
+        scan.output_location = f"s3://{bucket}/{key}"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+
+        monkeypatch.setattr(
+            "api.v1.views.get_s3_client",
+            lambda: (_ for _ in ()).throw(NoCredentialsError()),
+        )
+
+        framework = get_compliance_frameworks(scan.provider.provider)[0]
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": framework})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert resp.json()["errors"]["detail"] == "There is a problem with credentials."
+
+    def test_compliance_s3_success(
+        self, authenticated_client, scans_fixture, monkeypatch
+    ):
+        scan = scans_fixture[0]
+        bucket = "bucket"
+        prefix = "path/scan.zip"
+        scan.output_location = f"s3://{bucket}/{prefix}"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+
+        monkeypatch.setattr(
+            "api.v1.views.env",
+            type("env", (), {"str": lambda self, *args, **kwargs: "test-bucket"})(),
+        )
+
+        match_key = "path/compliance/mitre_attack_aws.csv"
+
+        class FakeS3Client:
+            def list_objects_v2(self, Bucket, Prefix):
+                return {"Contents": [{"Key": match_key}]}
+
+            def get_object(self, Bucket, Key):
+                return {"Body": io.BytesIO(b"ignored")}
+
+        monkeypatch.setattr("api.v1.views.get_s3_client", lambda: FakeS3Client())
+
+        framework = match_key.split("/")[-1].split(".")[0]
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": framework})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_200_OK
+        cd = resp["Content-Disposition"]
+        assert cd.startswith('attachment; filename="')
+        assert cd.endswith('filename="mitre_attack_aws.csv"')
+
+    def test_compliance_s3_not_found(
+        self, authenticated_client, scans_fixture, monkeypatch
+    ):
+        scan = scans_fixture[0]
+        bucket = "bucket"
+        scan.output_location = f"s3://{bucket}/x/scan.zip"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+
+        monkeypatch.setattr(
+            "api.v1.views.env",
+            type("env", (), {"str": lambda self, *args, **kwargs: "test-bucket"})(),
+        )
+
+        class FakeS3Client:
+            def list_objects_v2(self, Bucket, Prefix):
+                return {"Contents": []}
+
+            def get_object(self, Bucket, Key):
+                return {"Body": io.BytesIO(b"ignored")}
+
+        monkeypatch.setattr("api.v1.views.get_s3_client", lambda: FakeS3Client())
+
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": "cis_1.4_aws"})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert (
+            resp.json()["errors"]["detail"]
+            == "No compliance file found for name 'cis_1.4_aws'."
+        )
+
+    def test_compliance_local_file(
+        self, authenticated_client, scans_fixture, tmp_path, monkeypatch
+    ):
+        scan = scans_fixture[0]
+        scan.state = StateChoices.COMPLETED
+        base = tmp_path / "reports"
+        comp_dir = base / "compliance"
+        comp_dir.mkdir(parents=True)
+        fname = comp_dir / "scan_cis.csv"
+        fname.write_bytes(b"ignored")
+
+        scan.output_location = str(base / "scan.zip")
+        scan.save()
+
+        monkeypatch.setattr(
+            glob,
+            "glob",
+            lambda p: [str(fname)] if p.endswith("*_cis_1.4_aws.csv") else [],
+        )
+
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": "cis_1.4_aws"})
+        resp = authenticated_client.get(url)
+        assert resp.status_code == status.HTTP_200_OK
+        cd = resp["Content-Disposition"]
+        assert cd.startswith('attachment; filename="')
+        assert cd.endswith(f'filename="{fname.name}"')
+
+    @patch("api.v1.views.Task.objects.get")
+    @patch("api.v1.views.TaskSerializer")
+    def test__get_task_status_returns_none_if_task_not_executing(
+        self, mock_task_serializer, mock_task_get, authenticated_client, scans_fixture
+    ):
+        scan = scans_fixture[0]
+        scan.state = StateChoices.COMPLETED
+        scan.output_location = "dummy"
+        scan.save()
+
+        task = Task.objects.create(tenant_id=scan.tenant_id)
+        mock_task_get.return_value = task
+        mock_task_serializer.return_value.data = {
+            "id": str(task.id),
+            "state": StateChoices.COMPLETED,
+        }
+
+        url = reverse("scan-report", kwargs={"pk": scan.id})
+        response = authenticated_client.get(url)
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch("api.v1.views.get_s3_client")
+    @patch("api.v1.views.sentry_sdk.capture_exception")
+    def test_compliance_list_objects_client_error(
+        self,
+        mock_sentry_capture,
+        mock_get_s3_client,
+        authenticated_client,
+        scans_fixture,
+    ):
+        scan = scans_fixture[0]
+        scan.output_location = "s3://test-bucket/path/to/scan.zip"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+
+        fake_client = MagicMock()
+        fake_client.list_objects_v2.side_effect = ClientError(
+            {"Error": {"Code": "InternalError"}}, "ListObjectsV2"
+        )
+        mock_get_s3_client.return_value = fake_client
+
+        framework = get_compliance_frameworks(scan.provider.provider)[0]
+        url = reverse("scan-compliance", kwargs={"pk": scan.id, "name": framework})
+        response = authenticated_client.get(url)
+
+        assert response.status_code == status.HTTP_502_BAD_GATEWAY
+        assert (
+            response.json()["errors"]["detail"]
+            == "Unable to list compliance files in S3: encountered an AWS error."
+        )
+        mock_sentry_capture.assert_called()
+
+    @patch("api.v1.views.get_s3_client")
+    def test_report_s3_nosuchkey(
+        self, mock_get_s3_client, authenticated_client, scans_fixture
+    ):
+        scan = scans_fixture[0]
+        scan.output_location = "s3://test-bucket/report.zip"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+
+        fake_client = MagicMock()
+        fake_client.get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey"}}, "GetObject"
+        )
+        mock_get_s3_client.return_value = fake_client
+
+        url = reverse("scan-report", kwargs={"pk": scan.id})
+        response = authenticated_client.get(url)
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert response.json()["errors"]["detail"] == "The scan has no reports."
+
+    @patch("api.v1.views.get_s3_client")
+    def test_report_s3_client_error_other(
+        self, mock_get_s3_client, authenticated_client, scans_fixture
+    ):
+        scan = scans_fixture[0]
+        scan.output_location = "s3://test-bucket/report.zip"
+        scan.state = StateChoices.COMPLETED
+        scan.save()
+
+        fake_client = MagicMock()
+        fake_client.get_object.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied"}}, "GetObject"
+        )
+        mock_get_s3_client.return_value = fake_client
+
+        url = reverse("scan-report", kwargs={"pk": scan.id})
+        response = authenticated_client.get(url)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert (
+            response.json()["errors"]["detail"]
+            == "There is a problem with credentials."
+        )
 
 
 @pytest.mark.django_db
@@ -2661,6 +2952,8 @@ class TestFindingViewSet:
                 # ("resource_tags", "key:value", 2),
                 # ("resource_tags", "not:exists", 0),
                 # ("resource_tags", "not:exists,key:value", 2),
+                ("muted", True, 1),
+                ("muted", False, 1),
             ]
         ),
     )
@@ -4477,6 +4770,33 @@ class TestComplianceOverviewViewSet:
         assert len(response.json()["data"]) == 1
         assert response.json()["data"][0]["id"] == str(compliance_overview1.id)
 
+    def test_compliance_overview_metadata(
+        self, authenticated_client, compliance_overviews_fixture
+    ):
+        response = authenticated_client.get(
+            reverse("complianceoverview-metadata"),
+            {"filter[scan_id]": str(compliance_overviews_fixture[0].scan_id)},
+        )
+        data = response.json()
+
+        expected_regions = set(
+            ComplianceOverview.objects.all()
+            .values_list("region", flat=True)
+            .distinct("region")
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert data["data"]["type"] == "compliance-overviews-metadata"
+        assert data["data"]["id"] is None
+        assert set(data["data"]["attributes"]["regions"]) == expected_regions
+
+    def test_compliance_overview_metadata_missing_scan_id(self, authenticated_client):
+        # Attempt to list compliance overviews without providing filter[scan_id]
+        response = authenticated_client.get(reverse("complianceoverview-metadata"))
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()["errors"][0]["source"]["pointer"] == "filter[scan_id]"
+        assert response.json()["errors"][0]["code"] == "required"
+
 
 @pytest.mark.django_db
 class TestOverviewViewSet:
@@ -4568,3 +4888,415 @@ class TestScheduleViewSet:
             reverse("schedule-daily"), data=json_payload, format="json"
         )
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.django_db
+class TestIntegrationViewSet:
+    def test_integrations_list(self, authenticated_client, integrations_fixture):
+        response = authenticated_client.get(reverse("integration-list"))
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.json()["data"]) == len(integrations_fixture)
+
+    def test_integrations_retrieve(self, authenticated_client, integrations_fixture):
+        integration1, *_ = integrations_fixture
+        response = authenticated_client.get(
+            reverse("integration-detail", kwargs={"pk": integration1.id}),
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["data"]["id"] == str(integration1.id)
+        assert (
+            response.json()["data"]["attributes"]["configuration"]
+            == integration1.configuration
+        )
+
+    def test_integrations_invalid_retrieve(self, authenticated_client):
+        response = authenticated_client.get(
+            reverse(
+                "integration-detail",
+                kwargs={"pk": "f498b103-c760-4785-9a3e-e23fafbb7b02"},
+            )
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.parametrize(
+        "include_values, expected_resources",
+        [
+            ("providers", ["providers"]),
+        ],
+    )
+    def test_integrations_list_include(
+        self,
+        include_values,
+        expected_resources,
+        authenticated_client,
+        integrations_fixture,
+    ):
+        response = authenticated_client.get(
+            reverse("integration-list"), {"include": include_values}
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.json()["data"]) == len(integrations_fixture)
+        assert "included" in response.json()
+
+        included_data = response.json()["included"]
+        for expected_type in expected_resources:
+            assert any(
+                d.get("type") == expected_type for d in included_data
+            ), f"Expected type '{expected_type}' not found in included data"
+
+    @pytest.mark.parametrize(
+        "integration_type, configuration, credentials",
+        [
+            # Amazon S3 - AWS credentials
+            (
+                Integration.IntegrationChoices.S3,
+                {
+                    "bucket_name": "bucket-name",
+                    "output_directory": "output-directory",
+                },
+                {
+                    "role_arn": "arn:aws",
+                    "external_id": "external-id",
+                },
+            ),
+            # Amazon S3 - No credentials (AWS self-hosted)
+            (
+                Integration.IntegrationChoices.S3,
+                {
+                    "bucket_name": "bucket-name",
+                    "output_directory": "output-directory",
+                },
+                {},
+            ),
+        ],
+    )
+    def test_integrations_create_valid(
+        self,
+        authenticated_client,
+        providers_fixture,
+        integration_type,
+        configuration,
+        credentials,
+    ):
+        provider = Provider.objects.first()
+
+        data = {
+            "data": {
+                "type": "integrations",
+                "attributes": {
+                    "integration_type": integration_type,
+                    "configuration": configuration,
+                    "credentials": credentials,
+                },
+                "relationships": {
+                    "providers": {
+                        "data": [{"type": "providers", "id": str(provider.id)}]
+                    }
+                },
+            }
+        }
+        response = authenticated_client.post(
+            reverse("integration-list"),
+            data=json.dumps(data),
+            content_type="application/vnd.api+json",
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        assert Integration.objects.count() == 1
+        integration = Integration.objects.first()
+        assert integration.configuration == data["data"]["attributes"]["configuration"]
+        assert (
+            integration.integration_type
+            == data["data"]["attributes"]["integration_type"]
+        )
+        assert "credentials" not in response.json()["data"]["attributes"]
+        assert (
+            str(provider.id)
+            == data["data"]["relationships"]["providers"]["data"][0]["id"]
+        )
+
+    def test_integrations_create_valid_relationships(
+        self,
+        authenticated_client,
+        providers_fixture,
+    ):
+        provider1, provider2, *_ = providers_fixture
+
+        data = {
+            "data": {
+                "type": "integrations",
+                "attributes": {
+                    "integration_type": Integration.IntegrationChoices.S3,
+                    "configuration": {
+                        "bucket_name": "bucket-name",
+                        "output_directory": "output-directory",
+                    },
+                    "credentials": {
+                        "role_arn": "arn:aws",
+                        "external_id": "external-id",
+                    },
+                },
+                "relationships": {
+                    "providers": {
+                        "data": [
+                            {"type": "providers", "id": str(provider1.id)},
+                            {"type": "providers", "id": str(provider2.id)},
+                        ]
+                    }
+                },
+            }
+        }
+        response = authenticated_client.post(
+            reverse("integration-list"),
+            data=json.dumps(data),
+            content_type="application/vnd.api+json",
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        assert Integration.objects.first().providers.count() == 2
+
+    @pytest.mark.parametrize(
+        "attributes, error_code, error_pointer",
+        (
+            [
+                (
+                    {
+                        "integration_type": "whatever",
+                        "configuration": {
+                            "bucket_name": "bucket-name",
+                            "output_directory": "output-directory",
+                        },
+                        "credentials": {
+                            "role_arn": "arn:aws",
+                            "external_id": "external-id",
+                        },
+                    },
+                    "invalid_choice",
+                    "integration_type",
+                ),
+                (
+                    {
+                        "integration_type": "amazon_s3",
+                        "configuration": {},
+                        "credentials": {
+                            "role_arn": "arn:aws",
+                            "external_id": "external-id",
+                        },
+                    },
+                    "required",
+                    "bucket_name",
+                ),
+                (
+                    {
+                        "integration_type": "amazon_s3",
+                        "configuration": {
+                            "bucket_name": "bucket_name",
+                            "output_directory": "output_directory",
+                            "invalid_key": "invalid_value",
+                        },
+                        "credentials": {
+                            "role_arn": "arn:aws",
+                            "external_id": "external-id",
+                        },
+                    },
+                    "invalid",
+                    None,
+                ),
+                (
+                    {
+                        "integration_type": "amazon_s3",
+                        "configuration": {
+                            "bucket_name": "bucket_name",
+                            "output_directory": "output_directory",
+                        },
+                        "credentials": {"invalid_key": "invalid_key"},
+                    },
+                    "invalid",
+                    None,
+                ),
+            ]
+        ),
+    )
+    def test_integrations_invalid_create(
+        self,
+        authenticated_client,
+        attributes,
+        error_code,
+        error_pointer,
+    ):
+        data = {
+            "data": {
+                "type": "integrations",
+                "attributes": attributes,
+            }
+        }
+        response = authenticated_client.post(
+            reverse("integration-list"),
+            data=json.dumps(data),
+            content_type="application/vnd.api+json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()["errors"][0]["code"] == error_code
+        assert (
+            response.json()["errors"][0]["source"]["pointer"]
+            == f"/data/attributes/{error_pointer}"
+            if error_pointer
+            else "/data"
+        )
+
+    def test_integrations_partial_update(
+        self, authenticated_client, integrations_fixture
+    ):
+        integration, *_ = integrations_fixture
+        data = {
+            "data": {
+                "type": "integrations",
+                "id": str(integration.id),
+                "attributes": {
+                    "credentials": {
+                        "aws_access_key_id": "new_value",
+                    },
+                    # integration_type is `amazon_s3`
+                    "configuration": {
+                        "bucket_name": "new_bucket_name",
+                        "output_directory": "new_output_directory",
+                    },
+                },
+            }
+        }
+        response = authenticated_client.patch(
+            reverse("integration-detail", kwargs={"pk": integration.id}),
+            data=json.dumps(data),
+            content_type="application/vnd.api+json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        integration.refresh_from_db()
+        assert integration.credentials["aws_access_key_id"] == "new_value"
+        assert integration.configuration["bucket_name"] == "new_bucket_name"
+        assert integration.configuration["output_directory"] == "new_output_directory"
+
+    def test_integrations_partial_update_relationships(
+        self, authenticated_client, integrations_fixture
+    ):
+        integration, *_ = integrations_fixture
+        data = {
+            "data": {
+                "type": "integrations",
+                "id": str(integration.id),
+                "attributes": {
+                    "credentials": {
+                        "aws_access_key_id": "new_value",
+                    },
+                    # integration_type is `amazon_s3`
+                    "configuration": {
+                        "bucket_name": "new_bucket_name",
+                        "output_directory": "new_output_directory",
+                    },
+                },
+                "relationships": {"providers": {"data": []}},
+            }
+        }
+
+        assert integration.providers.count() > 0
+        response = authenticated_client.patch(
+            reverse("integration-detail", kwargs={"pk": integration.id}),
+            data=json.dumps(data),
+            content_type="application/vnd.api+json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        integration.refresh_from_db()
+        assert integration.providers.count() == 0
+
+    def test_integrations_partial_update_invalid_content_type(
+        self, authenticated_client, integrations_fixture
+    ):
+        integration, *_ = integrations_fixture
+        response = authenticated_client.patch(
+            reverse("integration-detail", kwargs={"pk": integration.id}),
+            data={},
+        )
+        assert response.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+
+    def test_integrations_partial_update_invalid_content(
+        self, authenticated_client, integrations_fixture
+    ):
+        integration, *_ = integrations_fixture
+        data = {
+            "data": {
+                "type": "integrations",
+                "id": str(integration.id),
+                "attributes": {"invalid_config": "value"},
+            }
+        }
+        response = authenticated_client.patch(
+            reverse("integration-detail", kwargs={"pk": integration.id}),
+            data=json.dumps(data),
+            content_type="application/vnd.api+json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_integrations_delete(
+        self,
+        authenticated_client,
+        integrations_fixture,
+    ):
+        integration, *_ = integrations_fixture
+        response = authenticated_client.delete(
+            reverse("integration-detail", kwargs={"pk": integration.id})
+        )
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+
+    def test_integrations_delete_invalid(self, authenticated_client):
+        response = authenticated_client.delete(
+            reverse(
+                "integration-detail",
+                kwargs={"pk": "e67d0283-440f-48d1-b5f8-38d0763474f4"},
+            )
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.parametrize(
+        "filter_name, filter_value, expected_count",
+        (
+            [
+                ("inserted_at", TODAY, 2),
+                ("inserted_at.gte", "2024-01-01", 2),
+                ("inserted_at.lte", "2024-01-01", 0),
+                ("integration_type", Integration.IntegrationChoices.S3, 2),
+                ("integration_type", Integration.IntegrationChoices.SLACK, 0),
+                (
+                    "integration_type__in",
+                    f"{Integration.IntegrationChoices.S3},{Integration.IntegrationChoices.SLACK}",
+                    2,
+                ),
+            ]
+        ),
+    )
+    def test_integrations_filters(
+        self,
+        authenticated_client,
+        integrations_fixture,
+        filter_name,
+        filter_value,
+        expected_count,
+    ):
+        response = authenticated_client.get(
+            reverse("integration-list"),
+            {f"filter[{filter_name}]": filter_value},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.json()["data"]) == expected_count
+
+    @pytest.mark.parametrize(
+        "filter_name",
+        (
+            [
+                "invalid",
+            ]
+        ),
+    )
+    def test_integrations_filters_invalid(self, authenticated_client, filter_name):
+        response = authenticated_client.get(
+            reverse("integration-list"),
+            {f"filter[{filter_name}]": "whatever"},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST

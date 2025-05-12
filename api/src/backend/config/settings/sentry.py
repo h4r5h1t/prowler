@@ -2,6 +2,8 @@ import sentry_sdk
 from config.env import env
 
 IGNORED_EXCEPTIONS = [
+    # Provider is not connected due to credentials errors
+    "is not connected",
     # Authentication Errors from AWS
     "InvalidToken",
     "AccessDeniedException",
@@ -10,16 +12,60 @@ IGNORED_EXCEPTIONS = [
     "UnauthorizedOperation",
     "AuthFailure",
     "InvalidClientTokenId",
+    "AWSInvalidProviderIdError",
+    "InternalServerErrorException",
     "AccessDenied",
-    # Shodan Check
-    "No Shodan API Key",
-    # For now we don't want to log the RequestLimitExceeded errors
-    "RequestLimitExceeded",
+    "No Shodan API Key",  # Shodan Check
+    "RequestLimitExceeded",  # For now we don't want to log the RequestLimitExceeded errors
     "ThrottlingException",
     "Rate exceeded",
-    # The following comes from urllib3
-    # eu-west-1 -- HTTPClientError[126]: An HTTP Client raised an unhandled exception: AWSHTTPSConnectionPool(host='hostname.s3.eu-west-1.amazonaws.com', port=443): Pool is closed.
-    "Pool is closed",
+    "SubscriptionRequiredException",
+    "UnknownOperationException",
+    "OptInRequired",
+    "ReadTimeout",
+    "LimitExceeded",
+    "ConnectTimeoutError",
+    "ExpiredToken",
+    "IncompleteSignature",
+    "RegionDisabledException",
+    "TooManyRequestsException",
+    "SignatureDoesNotMatch",
+    "InvalidParameterValueException",
+    "InvalidInputException",
+    "ValidationException",
+    "AWSSecretAccessKeyInvalidError",
+    "InvalidAction",
+    "InvalidRequestException",
+    "RequestExpired",
+    "ConnectionClosedError",
+    "MaxRetryError",
+    "AWSAccessKeyIDInvalidError",
+    "AWSSessionTokenExpiredError",
+    "EndpointConnectionError",  # AWS Service is not available in a region
+    "Pool is closed",  # The following comes from urllib3: eu-west-1 -- HTTPClientError[126]: An HTTP Client raised an unhandled exception: AWSHTTPSConnectionPool(host='hostname.s3.eu-west-1.amazonaws.com', port=443): Pool is closed.
+    # Authentication Errors from GCP
+    "ClientAuthenticationError",
+    "AuthorizationFailed",
+    "Reauthentication is needed",
+    "Permission denied to get service",
+    "API has not been used in project",
+    "HttpError 404 when requesting",
+    "HttpError 403 when requesting",
+    "HttpError 400 when requesting",
+    "GCPNoAccesibleProjectsError",
+    # Authentication Errors from Azure
+    "ClientAuthenticationError",
+    "AuthorizationFailed",
+    "Subscription Not Registered",
+    "AzureNotValidClientIdError",
+    "AzureNotValidClientSecretError",
+    "AzureNotValidTenantIdError",
+    "AzureInvalidProviderIdError",
+    "AzureTenantIdAndClientSecretNotBelongingToClientIdError",
+    "AzureTenantIdAndClientIdNotBelongingToClientSecretError",
+    "AzureClientIdAndClientSecretNotBelongingToTenantIdError",
+    "AzureHTTPResponseError",
+    "Error with credentials provided",
 ]
 
 
@@ -51,4 +97,6 @@ sentry_sdk.init(
         # possible.
         "continuous_profiling_auto_start": True,
     },
+    attach_stacktrace=True,
+    ignore_errors=IGNORED_EXCEPTIONS,
 )

@@ -1,6 +1,7 @@
 import glob
 import os
 
+import sentry_sdk
 from allauth.socialaccount.providers.github.views import GitHubOAuth2Adapter
 from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from botocore.exceptions import ClientError, NoCredentialsError, ParamValidationError
@@ -21,6 +22,7 @@ from django.http import HttpResponse
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_control
+from django_celery_beat.models import PeriodicTask
 from drf_spectacular.settings import spectacular_settings
 from drf_spectacular.utils import (
     OpenApiParameter,
@@ -53,10 +55,12 @@ from tasks.tasks import (
 )
 
 from api.base_views import BaseRLSViewSet, BaseTenantViewset, BaseUserViewset
+from api.compliance import get_compliance_frameworks
 from api.db_router import MainRouter
 from api.filters import (
     ComplianceOverviewFilter,
     FindingFilter,
+    IntegrationFilter,
     InvitationFilter,
     MembershipFilter,
     ProviderFilter,
@@ -74,6 +78,7 @@ from api.filters import (
 from api.models import (
     ComplianceOverview,
     Finding,
+    Integration,
     Invitation,
     Membership,
     Provider,
@@ -98,10 +103,14 @@ from api.rls import Tenant
 from api.utils import CustomOAuth2Client, validate_invitation
 from api.v1.serializers import (
     ComplianceOverviewFullSerializer,
+    ComplianceOverviewMetadataSerializer,
     ComplianceOverviewSerializer,
     FindingDynamicFilterSerializer,
     FindingMetadataSerializer,
     FindingSerializer,
+    IntegrationCreateSerializer,
+    IntegrationSerializer,
+    IntegrationUpdateSerializer,
     InvitationAcceptSerializer,
     InvitationCreateSerializer,
     InvitationSerializer,
@@ -126,6 +135,7 @@ from api.v1.serializers import (
     RoleProviderGroupRelationshipSerializer,
     RoleSerializer,
     RoleUpdateSerializer,
+    ScanComplianceReportSerializer,
     ScanCreateSerializer,
     ScanReportSerializer,
     ScanSerializer,
@@ -239,7 +249,7 @@ class SchemaView(SpectacularAPIView):
 
     def get(self, request, *args, **kwargs):
         spectacular_settings.TITLE = "Prowler API"
-        spectacular_settings.VERSION = "1.5.0"
+        spectacular_settings.VERSION = "1.7.0"
         spectacular_settings.DESCRIPTION = (
             "Prowler API specification.\n\nThis file is auto-generated."
         )
@@ -294,6 +304,11 @@ class SchemaView(SpectacularAPIView):
                 "name": "Task",
                 "description": "Endpoints for task management, allowing retrieval of task status and "
                 "revoking tasks that have not started.",
+            },
+            {
+                "name": "Integration",
+                "description": "Endpoints for managing third-party integrations, including registration, configuration,"
+                " retrieval, and deletion of integrations such as S3, JIRA, or other services.",
             },
         ]
         return super().get(request, *args, **kwargs)
@@ -1076,6 +1091,8 @@ class ProviderViewSet(BaseRLSViewSet):
         provider = get_object_or_404(Provider, pk=pk)
         provider.is_deleted = True
         provider.save()
+        task_name = f"scan-perform-scheduled-{pk}"
+        PeriodicTask.objects.filter(name=task_name).update(enabled=False)
 
         with transaction.atomic():
             task = delete_provider_task.delay(
@@ -1135,6 +1152,27 @@ class ProviderViewSet(BaseRLSViewSet):
             404: OpenApiResponse(description="The scan has no reports"),
         },
     ),
+    compliance=extend_schema(
+        tags=["Scan"],
+        summary="Retrieve compliance report as CSV",
+        description="Download a specific compliance report (e.g., 'cis_1.4_aws') as a CSV file.",
+        parameters=[
+            OpenApiParameter(
+                name="name",
+                type=str,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description="The compliance report name, like 'cis_1.4_aws'",
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="CSV file containing the compliance report"
+            ),
+            404: OpenApiResponse(description="Compliance report not found"),
+        },
+        request=None,
+    ),
 )
 @method_decorator(CACHE_DECORATOR, name="list")
 @method_decorator(CACHE_DECORATOR, name="retrieve")
@@ -1187,6 +1225,10 @@ class ScanViewSet(BaseRLSViewSet):
             if hasattr(self, "response_serializer_class"):
                 return self.response_serializer_class
             return ScanReportSerializer
+        elif self.action == "compliance":
+            if hasattr(self, "response_serializer_class"):
+                return self.response_serializer_class
+            return ScanComplianceReportSerializer
         return super().get_serializer_class()
 
     def partial_update(self, request, *args, **kwargs):
@@ -1204,70 +1246,111 @@ class ScanViewSet(BaseRLSViewSet):
         )
         return Response(data=read_serializer.data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=["get"], url_name="report")
-    def report(self, request, pk=None):
-        scan_instance = self.get_object()
+    def _get_task_status(self, scan_instance):
+        """
+        Returns task status if the scan or its associated report-generation task is still executing.
 
-        if scan_instance.state == StateChoices.EXECUTING:
-            # If the scan is still running, return the task
-            prowler_task = Task.objects.get(id=scan_instance.task.id)
-            self.response_serializer_class = TaskSerializer
-            output_serializer = self.get_serializer(prowler_task)
-            return Response(
-                data=output_serializer.data,
-                status=status.HTTP_202_ACCEPTED,
-                headers={
-                    "Content-Location": reverse(
-                        "task-detail", kwargs={"pk": output_serializer.data["id"]}
-                    )
-                },
-            )
+        If the scan is in an EXECUTING state or if a background task related to report generation
+        is found and also executing, this method returns a 202 Accepted response with the task
+        metadata and a `Content-Location` header pointing to the task detail endpoint.
 
-        try:
-            output_celery_task = Task.objects.get(
-                task_runner_task__task_name="scan-report",
-                task_runner_task__task_args__contains=pk,
-            )
-            self.response_serializer_class = TaskSerializer
-            output_serializer = self.get_serializer(output_celery_task)
-            if output_serializer.data["state"] == StateChoices.EXECUTING:
-                # If the task is still running, return the task
-                return Response(
-                    data=output_serializer.data,
-                    status=status.HTTP_202_ACCEPTED,
-                    headers={
-                        "Content-Location": reverse(
-                            "task-detail", kwargs={"pk": output_serializer.data["id"]}
-                        )
-                    },
-                )
-        except Task.DoesNotExist:
-            # If the task does not exist, it means that the task is removed from the database
-            pass
+        Args:
+            scan_instance (Scan): The scan instance for which the task status is being checked.
 
-        output_location = scan_instance.output_location
-        if not output_location:
-            return Response(
-                {"detail": "The scan has no reports."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        Returns:
+            Response or None:
+                - A `Response` with HTTP 202 status and serialized task data if the task is executing.
+                - `None` if no running task is found or if the task has already completed.
+        """
+        task = None
 
-        if scan_instance.output_location.startswith("s3://"):
+        if scan_instance.state == StateChoices.EXECUTING and scan_instance.task:
+            task = scan_instance.task
+        else:
             try:
-                s3_client = get_s3_client()
+                task = Task.objects.get(
+                    task_runner_task__task_name="scan-report",
+                    task_runner_task__task_args__contains=str(scan_instance.id),
+                )
+            except Task.DoesNotExist:
+                return None
+
+        self.response_serializer_class = TaskSerializer
+        serializer = self.get_serializer(task)
+
+        if serializer.data.get("state") != StateChoices.EXECUTING:
+            return None
+
+        return Response(
+            data=serializer.data,
+            status=status.HTTP_202_ACCEPTED,
+            headers={
+                "Content-Location": reverse(
+                    "task-detail", kwargs={"pk": serializer.data["id"]}
+                )
+            },
+        )
+
+    def _load_file(self, path_pattern, s3=False, bucket=None, list_objects=False):
+        """
+        Loads a binary file (e.g., ZIP or CSV) and returns its content and filename.
+
+        Depending on the input parameters, this method supports loading:
+        - From S3 using a direct key.
+        - From S3 by listing objects under a prefix and matching suffix.
+        - From the local filesystem using glob pattern matching.
+
+        Args:
+            path_pattern (str): The key or glob pattern representing the file location.
+            s3 (bool, optional): Whether the file is stored in S3. Defaults to False.
+            bucket (str, optional): The name of the S3 bucket, required if `s3=True`. Defaults to None.
+            list_objects (bool, optional): If True and `s3=True`, list objects by prefix to find the file. Defaults to False.
+
+        Returns:
+            tuple[bytes, str]: A tuple containing the file content as bytes and the filename if successful.
+            Response: A DRF `Response` object with an appropriate status and error detail if an error occurs.
+        """
+        if s3:
+            try:
+                client = get_s3_client()
             except (ClientError, NoCredentialsError, ParamValidationError):
                 return Response(
                     {"detail": "There is a problem with credentials."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-
-            bucket_name = env.str("DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET")
-            key = output_location[len(f"s3://{bucket_name}/") :]
+            if list_objects:
+                # list keys under prefix then match suffix
+                prefix = os.path.dirname(path_pattern)
+                suffix = os.path.basename(path_pattern)
+                try:
+                    resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+                except ClientError as e:
+                    sentry_sdk.capture_exception(e)
+                    return Response(
+                        {
+                            "detail": "Unable to list compliance files in S3: encountered an AWS error."
+                        },
+                        status=status.HTTP_502_BAD_GATEWAY,
+                    )
+                contents = resp.get("Contents", [])
+                keys = [obj["Key"] for obj in contents if obj["Key"].endswith(suffix)]
+                if not keys:
+                    return Response(
+                        {
+                            "detail": f"No compliance file found for name '{os.path.splitext(suffix)[0]}'."
+                        },
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                # path_pattern here is prefix, but in compliance we build correct suffix check before
+                key = keys[0]
+            else:
+                # path_pattern is exact key
+                key = path_pattern
             try:
-                s3_object = s3_client.get_object(Bucket=bucket_name, Key=key)
+                s3_obj = client.get_object(Bucket=bucket, Key=key)
             except ClientError as e:
-                error_code = e.response.get("Error", {}).get("Code")
-                if error_code == "NoSuchKey":
+                code = e.response.get("Error", {}).get("Code")
+                if code == "NoSuchKey":
                     return Response(
                         {"detail": "The scan has no reports."},
                         status=status.HTTP_404_NOT_FOUND,
@@ -1276,20 +1359,96 @@ class ScanViewSet(BaseRLSViewSet):
                     {"detail": "There is a problem with credentials."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-            file_content = s3_object["Body"].read()
-            filename = os.path.basename(output_location.split("/")[-1])
+            content = s3_obj["Body"].read()
+            filename = os.path.basename(key)
         else:
-            zip_files = glob.glob(output_location)
-            file_path = zip_files[0]
-            with open(file_path, "rb") as f:
-                file_content = f.read()
-            filename = os.path.basename(file_path)
+            files = glob.glob(path_pattern)
+            if not files:
+                return Response(
+                    {"detail": "The scan has no reports."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            filepath = files[0]
+            with open(filepath, "rb") as f:
+                content = f.read()
+            filename = os.path.basename(filepath)
 
-        response = HttpResponse(
-            file_content, content_type="application/x-zip-compressed"
-        )
+        return content, filename
+
+    def _serve_file(self, content, filename, content_type):
+        response = HttpResponse(content, content_type=content_type)
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+
         return response
+
+    @action(detail=True, methods=["get"], url_name="report")
+    def report(self, request, pk=None):
+        scan = self.get_object()
+        # Check for executing tasks
+        running_resp = self._get_task_status(scan)
+        if running_resp:
+            return running_resp
+
+        if not scan.output_location:
+            return Response(
+                {"detail": "The scan has no reports."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        if scan.output_location.startswith("s3://"):
+            bucket = env.str("DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET", "")
+            key_prefix = scan.output_location.removeprefix(f"s3://{bucket}/")
+            loader = self._load_file(
+                key_prefix, s3=True, bucket=bucket, list_objects=False
+            )
+        else:
+            loader = self._load_file(scan.output_location, s3=False)
+
+        if isinstance(loader, Response):
+            return loader
+
+        content, filename = loader
+        return self._serve_file(content, filename, "application/x-zip-compressed")
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="compliance/(?P<name>[^/]+)",
+        url_name="compliance",
+    )
+    def compliance(self, request, pk=None, name=None):
+        scan = self.get_object()
+        if name not in get_compliance_frameworks(scan.provider.provider):
+            return Response(
+                {"detail": f"Compliance '{name}' not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        running_resp = self._get_task_status(scan)
+        if running_resp:
+            return running_resp
+
+        if not scan.output_location:
+            return Response(
+                {"detail": "The scan has no reports."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        if scan.output_location.startswith("s3://"):
+            bucket = env.str("DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET", "")
+            key_prefix = scan.output_location.removeprefix(f"s3://{bucket}/")
+            prefix = os.path.join(
+                os.path.dirname(key_prefix), "compliance", f"{name}.csv"
+            )
+            loader = self._load_file(prefix, s3=True, bucket=bucket, list_objects=True)
+        else:
+            base = os.path.dirname(scan.output_location)
+            pattern = os.path.join(base, "compliance", f"*_{name}.csv")
+            loader = self._load_file(pattern, s3=False)
+
+        if isinstance(loader, Response):
+            return loader
+
+        content, filename = loader
+        return self._serve_file(content, filename, "text/csv")
 
     def create(self, request, *args, **kwargs):
         input_serializer = self.get_serializer(data=request.data)
@@ -2036,6 +2195,21 @@ class RoleProviderGroupRelationshipView(RelationshipView, BaseRLSViewSet):
         description="Fetch detailed information about a specific compliance overview by its ID, including detailed "
         "requirement information and check's status.",
     ),
+    metadata=extend_schema(
+        tags=["Compliance Overview"],
+        summary="Retrieve metadata values from compliance overviews",
+        description="Fetch unique metadata values from a set of compliance overviews. This is useful for dynamic "
+        "filtering.",
+        parameters=[
+            OpenApiParameter(
+                name="filter[scan_id]",
+                required=True,
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.QUERY,
+                description="Related scan ID.",
+            ),
+        ],
+    ),
 )
 @method_decorator(CACHE_DECORATOR, name="list")
 @method_decorator(CACHE_DECORATOR, name="retrieve")
@@ -2097,6 +2271,8 @@ class ComplianceOverviewViewSet(BaseRLSViewSet):
     def get_serializer_class(self):
         if self.action == "retrieve":
             return ComplianceOverviewFullSerializer
+        elif self.action == "metadata":
+            return ComplianceOverviewMetadataSerializer
         return super().get_serializer_class()
 
     def list(self, request, *args, **kwargs):
@@ -2112,6 +2288,35 @@ class ComplianceOverviewViewSet(BaseRLSViewSet):
                 ]
             )
         return super().list(request, *args, **kwargs)
+
+    @action(detail=False, methods=["get"], url_name="metadata")
+    def metadata(self, request):
+        scan_id = request.query_params.get("filter[scan_id]")
+        if not scan_id:
+            raise ValidationError(
+                [
+                    {
+                        "detail": "This query parameter is required.",
+                        "status": 400,
+                        "source": {"pointer": "filter[scan_id]"},
+                        "code": "required",
+                    }
+                ]
+            )
+
+        tenant_id = self.request.tenant_id
+
+        regions = list(
+            ComplianceOverview.objects.filter(tenant_id=tenant_id, scan_id=scan_id)
+            .values_list("region", flat=True)
+            .order_by("region")
+            .distinct()
+        )
+        result = {"regions": regions}
+
+        serializer = self.get_serializer(data=result)
+        serializer.is_valid(raise_exception=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 @extend_schema(tags=["Overview"])
@@ -2433,3 +2638,67 @@ class ScheduleViewSet(BaseRLSViewSet):
                 )
             },
         )
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Integration"],
+        summary="List all integrations",
+        description="Retrieve a list of all configured integrations with options for filtering by various criteria.",
+    ),
+    retrieve=extend_schema(
+        tags=["Integration"],
+        summary="Retrieve integration details",
+        description="Fetch detailed information about a specific integration by its ID.",
+    ),
+    create=extend_schema(
+        tags=["Integration"],
+        summary="Create a new integration",
+        description="Register a new integration with the system, providing necessary configuration details.",
+    ),
+    partial_update=extend_schema(
+        tags=["Integration"],
+        summary="Partially update an integration",
+        description="Modify certain fields of an existing integration without affecting other settings.",
+    ),
+    destroy=extend_schema(
+        tags=["Integration"],
+        summary="Delete an integration",
+        description="Remove an integration from the system by its ID.",
+    ),
+)
+@method_decorator(CACHE_DECORATOR, name="list")
+@method_decorator(CACHE_DECORATOR, name="retrieve")
+class IntegrationViewSet(BaseRLSViewSet):
+    queryset = Integration.objects.all()
+    serializer_class = IntegrationSerializer
+    http_method_names = ["get", "post", "patch", "delete"]
+    filterset_class = IntegrationFilter
+    ordering = ["integration_type", "-inserted_at"]
+    # RBAC required permissions
+    required_permissions = [Permissions.MANAGE_INTEGRATIONS]
+    allowed_providers = None
+
+    def get_queryset(self):
+        user_roles = get_role(self.request.user)
+        if user_roles.unlimited_visibility:
+            # User has unlimited visibility, return all integrations
+            queryset = Integration.objects.filter(tenant_id=self.request.tenant_id)
+        else:
+            # User lacks permission, filter providers based on provider groups associated with the role
+            allowed_providers = get_providers(user_roles)
+            queryset = Integration.objects.filter(providers__in=allowed_providers)
+            self.allowed_providers = allowed_providers
+        return queryset
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return IntegrationCreateSerializer
+        elif self.action == "partial_update":
+            return IntegrationUpdateSerializer
+        return super().get_serializer_class()
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["allowed_providers"] = self.allowed_providers
+        return context

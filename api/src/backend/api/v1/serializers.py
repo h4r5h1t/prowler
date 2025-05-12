@@ -16,6 +16,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from api.models import (
     ComplianceOverview,
     Finding,
+    Integration,
+    IntegrationProviderRelationship,
     Invitation,
     InvitationRoleRelationship,
     Membership,
@@ -34,6 +36,13 @@ from api.models import (
     UserRoleRelationship,
 )
 from api.rls import Tenant
+from api.v1.serializer_utils.integrations import (
+    AWSCredentialSerializer,
+    IntegrationConfigField,
+    IntegrationCredentialField,
+    S3ConfigSerializer,
+)
+from api.v1.serializer_utils.providers import ProviderSecretField
 
 # Tokens
 
@@ -843,6 +852,10 @@ class ScanSerializer(RLSSerializer):
             "url",
         ]
 
+    included_serializers = {
+        "provider": "api.v1.serializers.ProviderIncludeSerializer",
+    }
+
 
 class ScanIncludeSerializer(RLSSerializer):
     trigger = serializers.ChoiceField(
@@ -945,6 +958,15 @@ class ScanReportSerializer(serializers.Serializer):
     class Meta:
         resource_name = "scan-reports"
         fields = ["id"]
+
+
+class ScanComplianceReportSerializer(serializers.Serializer):
+    id = serializers.CharField(source="scan")
+    name = serializers.CharField()
+
+    class Meta:
+        resource_name = "scan-reports"
+        fields = ["id", "name"]
 
 
 class ResourceTagSerializer(RLSSerializer):
@@ -1079,6 +1101,7 @@ class FindingSerializer(RLSSerializer):
             "inserted_at",
             "updated_at",
             "first_seen_at",
+            "muted",
             "url",
             # Relationships
             "scan",
@@ -1128,6 +1151,8 @@ class BaseWriteProviderSecretSerializer(BaseWriteSerializer):
                 serializer = GCPProviderSecret(data=secret)
             elif provider_type == Provider.ProviderChoices.KUBERNETES.value:
                 serializer = KubernetesProviderSecret(data=secret)
+            elif provider_type == Provider.ProviderChoices.M365.value:
+                serializer = M365ProviderSecret(data=secret)
             else:
                 raise serializers.ValidationError(
                     {"provider": f"Provider type not supported {provider_type}"}
@@ -1167,6 +1192,17 @@ class AzureProviderSecret(serializers.Serializer):
         resource_name = "provider-secrets"
 
 
+class M365ProviderSecret(serializers.Serializer):
+    client_id = serializers.CharField()
+    client_secret = serializers.CharField()
+    tenant_id = serializers.CharField()
+    user = serializers.EmailField()
+    encrypted_password = serializers.CharField()
+
+    class Meta:
+        resource_name = "provider-secrets"
+
+
 class GCPProviderSecret(serializers.Serializer):
     client_id = serializers.CharField()
     client_secret = serializers.CharField()
@@ -1196,141 +1232,6 @@ class AWSRoleAssumptionProviderSecret(serializers.Serializer):
 
     class Meta:
         resource_name = "provider-secrets"
-
-
-@extend_schema_field(
-    {
-        "oneOf": [
-            {
-                "type": "object",
-                "title": "AWS Static Credentials",
-                "properties": {
-                    "aws_access_key_id": {
-                        "type": "string",
-                        "description": "The AWS access key ID. Required for environments where no IAM role is being "
-                        "assumed and direct AWS access is needed.",
-                    },
-                    "aws_secret_access_key": {
-                        "type": "string",
-                        "description": "The AWS secret access key. Must accompany 'aws_access_key_id' to authorize "
-                        "access to AWS resources.",
-                    },
-                    "aws_session_token": {
-                        "type": "string",
-                        "description": "The session token associated with temporary credentials. Only needed for "
-                        "session-based or temporary AWS access.",
-                    },
-                },
-                "required": ["aws_access_key_id", "aws_secret_access_key"],
-            },
-            {
-                "type": "object",
-                "title": "AWS Assume Role",
-                "properties": {
-                    "role_arn": {
-                        "type": "string",
-                        "description": "The Amazon Resource Name (ARN) of the role to assume. Required for AWS role "
-                        "assumption.",
-                    },
-                    "external_id": {
-                        "type": "string",
-                        "description": "An identifier to enhance security for role assumption.",
-                    },
-                    "aws_access_key_id": {
-                        "type": "string",
-                        "description": "The AWS access key ID. Only required if the environment lacks pre-configured "
-                        "AWS credentials.",
-                    },
-                    "aws_secret_access_key": {
-                        "type": "string",
-                        "description": "The AWS secret access key. Required if 'aws_access_key_id' is provided or if "
-                        "no AWS credentials are pre-configured.",
-                    },
-                    "aws_session_token": {
-                        "type": "string",
-                        "description": "The session token for temporary credentials, if applicable.",
-                    },
-                    "session_duration": {
-                        "type": "integer",
-                        "minimum": 900,
-                        "maximum": 43200,
-                        "default": 3600,
-                        "description": "The duration (in seconds) for the role session.",
-                    },
-                    "role_session_name": {
-                        "type": "string",
-                        "description": "An identifier for the role session, useful for tracking sessions in AWS logs. "
-                        "The regex used to validate this parameter is a string of characters consisting of "
-                        "upper- and lower-case alphanumeric characters with no spaces. You can also include "
-                        "underscores or any of the following characters: =,.@-\n\n"
-                        "Examples:\n"
-                        "- MySession123\n"
-                        "- User_Session-1\n"
-                        "- Test.Session@2",
-                        "pattern": "^[a-zA-Z0-9=,.@_-]+$",
-                    },
-                },
-                "required": ["role_arn", "external_id"],
-            },
-            {
-                "type": "object",
-                "title": "Azure Static Credentials",
-                "properties": {
-                    "client_id": {
-                        "type": "string",
-                        "description": "The Azure application (client) ID for authentication in Azure AD.",
-                    },
-                    "client_secret": {
-                        "type": "string",
-                        "description": "The client secret associated with the application (client) ID, providing "
-                        "secure access.",
-                    },
-                    "tenant_id": {
-                        "type": "string",
-                        "description": "The Azure tenant ID, representing the directory where the application is "
-                        "registered.",
-                    },
-                },
-                "required": ["client_id", "client_secret", "tenant_id"],
-            },
-            {
-                "type": "object",
-                "title": "GCP Static Credentials",
-                "properties": {
-                    "client_id": {
-                        "type": "string",
-                        "description": "The client ID from Google Cloud, used to identify the application for GCP "
-                        "access.",
-                    },
-                    "client_secret": {
-                        "type": "string",
-                        "description": "The client secret associated with the GCP client ID, required for secure "
-                        "access.",
-                    },
-                    "refresh_token": {
-                        "type": "string",
-                        "description": "A refresh token that allows the application to obtain new access tokens for "
-                        "extended use.",
-                    },
-                },
-                "required": ["client_id", "client_secret", "refresh_token"],
-            },
-            {
-                "type": "object",
-                "title": "Kubernetes Static Credentials",
-                "properties": {
-                    "kubeconfig_content": {
-                        "type": "string",
-                        "description": "The content of the Kubernetes kubeconfig file, encoded as a string.",
-                    }
-                },
-                "required": ["kubeconfig_content"],
-            },
-        ]
-    }
-)
-class ProviderSecretField(serializers.JSONField):
-    pass
 
 
 class ProviderSecretSerializer(RLSSerializer):
@@ -1606,8 +1507,8 @@ class RoleSerializer(RLSSerializer, BaseWriteSerializer):
             "manage_account",
             # Disable for the first release
             # "manage_billing",
-            # "manage_integrations",
             # /Disable for the first release
+            "manage_integrations",
             "manage_providers",
             "manage_scans",
             "permission_state",
@@ -1889,6 +1790,13 @@ class ComplianceOverviewFullSerializer(ComplianceOverviewSerializer):
         return obj.requirements
 
 
+class ComplianceOverviewMetadataSerializer(serializers.Serializer):
+    regions = serializers.ListField(child=serializers.CharField(), allow_empty=True)
+
+    class Meta:
+        resource_name = "compliance-overviews-metadata"
+
+
 # Overviews
 
 
@@ -2013,3 +1921,201 @@ class ScheduleDailyCreateSerializer(serializers.Serializer):
             if unknown_keys:
                 raise ValidationError(f"Invalid fields: {unknown_keys}")
         return data
+
+
+# Integrations
+
+
+class BaseWriteIntegrationSerializer(BaseWriteSerializer):
+    @staticmethod
+    def validate_integration_data(
+        integration_type: str,
+        providers: list[Provider],  # noqa
+        configuration: dict,
+        credentials: dict,
+    ):
+        if integration_type == Integration.IntegrationChoices.S3:
+            config_serializer = S3ConfigSerializer
+            credentials_serializers = [AWSCredentialSerializer]
+            # TODO: This will be required for AWS Security Hub
+            # if providers and not all(
+            #     provider.provider == Provider.ProviderChoices.AWS
+            #     for provider in providers
+            # ):
+            #     raise serializers.ValidationError(
+            #         {"providers": "All providers must be AWS for the S3 integration."}
+            #     )
+        else:
+            raise serializers.ValidationError(
+                {
+                    "integration_type": f"Integration type not supported yet: {integration_type}"
+                }
+            )
+
+        config_serializer(data=configuration).is_valid(raise_exception=True)
+
+        for cred_serializer in credentials_serializers:
+            try:
+                cred_serializer(data=credentials).is_valid(raise_exception=True)
+                break
+            except ValidationError:
+                continue
+        else:
+            raise ValidationError(
+                {"credentials": "Invalid credentials for the integration type."}
+            )
+
+
+class IntegrationSerializer(RLSSerializer):
+    """
+    Serializer for the Integration model.
+    """
+
+    providers = serializers.ResourceRelatedField(
+        queryset=Provider.objects.all(), many=True
+    )
+
+    class Meta:
+        model = Integration
+        fields = [
+            "id",
+            "inserted_at",
+            "updated_at",
+            "enabled",
+            "connected",
+            "connection_last_checked_at",
+            "integration_type",
+            "configuration",
+            "providers",
+            "url",
+        ]
+
+    included_serializers = {
+        "providers": "api.v1.serializers.ProviderIncludeSerializer",
+    }
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        allowed_providers = self.context.get("allowed_providers")
+        if allowed_providers:
+            allowed_provider_ids = {str(provider.id) for provider in allowed_providers}
+            representation["providers"] = [
+                provider
+                for provider in representation["providers"]
+                if provider["id"] in allowed_provider_ids
+            ]
+        return representation
+
+
+class IntegrationCreateSerializer(BaseWriteIntegrationSerializer):
+    credentials = IntegrationCredentialField(write_only=True)
+    configuration = IntegrationConfigField()
+    providers = serializers.ResourceRelatedField(
+        queryset=Provider.objects.all(), many=True, required=False
+    )
+
+    class Meta:
+        model = Integration
+        fields = [
+            "inserted_at",
+            "updated_at",
+            "enabled",
+            "connected",
+            "connection_last_checked_at",
+            "integration_type",
+            "configuration",
+            "credentials",
+            "providers",
+        ]
+        extra_kwargs = {
+            "inserted_at": {"read_only": True},
+            "updated_at": {"read_only": True},
+            "connected": {"read_only": True},
+            "enabled": {"read_only": True},
+            "connection_last_checked_at": {"read_only": True},
+        }
+
+    def validate(self, attrs):
+        integration_type = attrs.get("integration_type")
+        providers = attrs.get("providers")
+        configuration = attrs.get("configuration")
+        credentials = attrs.get("credentials")
+
+        validated_attrs = super().validate(attrs)
+        self.validate_integration_data(
+            integration_type, providers, configuration, credentials
+        )
+        return validated_attrs
+
+    def create(self, validated_data):
+        tenant_id = self.context.get("tenant_id")
+
+        providers = validated_data.pop("providers", [])
+        integration = Integration.objects.create(tenant_id=tenant_id, **validated_data)
+
+        through_model_instances = [
+            IntegrationProviderRelationship(
+                integration=integration,
+                provider=provider,
+                tenant_id=tenant_id,
+            )
+            for provider in providers
+        ]
+        IntegrationProviderRelationship.objects.bulk_create(through_model_instances)
+
+        return integration
+
+
+class IntegrationUpdateSerializer(BaseWriteIntegrationSerializer):
+    credentials = IntegrationCredentialField(write_only=True, required=False)
+    configuration = IntegrationConfigField(required=False)
+    providers = serializers.ResourceRelatedField(
+        queryset=Provider.objects.all(), many=True, required=False
+    )
+
+    class Meta:
+        model = Integration
+        fields = [
+            "inserted_at",
+            "updated_at",
+            "enabled",
+            "connected",
+            "connection_last_checked_at",
+            "integration_type",
+            "configuration",
+            "credentials",
+            "providers",
+        ]
+        extra_kwargs = {
+            "inserted_at": {"read_only": True},
+            "updated_at": {"read_only": True},
+            "connected": {"read_only": True},
+            "connection_last_checked_at": {"read_only": True},
+            "integration_type": {"read_only": True},
+        }
+
+    def validate(self, attrs):
+        integration_type = self.instance.integration_type
+        providers = attrs.get("providers")
+        configuration = attrs.get("configuration") or self.instance.configuration
+        credentials = attrs.get("credentials") or self.instance.credentials
+
+        validated_attrs = super().validate(attrs)
+        self.validate_integration_data(
+            integration_type, providers, configuration, credentials
+        )
+        return validated_attrs
+
+    def update(self, instance, validated_data):
+        tenant_id = self.context.get("tenant_id")
+        if validated_data.get("providers") is not None:
+            instance.providers.clear()
+            new_relationships = [
+                IntegrationProviderRelationship(
+                    integration=instance, provider=provider, tenant_id=tenant_id
+                )
+                for provider in validated_data["providers"]
+            ]
+            IntegrationProviderRelationship.objects.bulk_create(new_relationships)
+
+        return super().update(instance, validated_data)
