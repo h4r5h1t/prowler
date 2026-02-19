@@ -6,8 +6,9 @@ from prowler.providers.azure.services.defender.defender_service import (
     AutoProvisioningSetting,
     Defender,
     IoTSecuritySolution,
+    JITPolicy,
     Pricing,
-    SecurityContacts,
+    SecurityContactConfiguration,
     Setting,
 )
 from tests.providers.azure.azure_fixtures import (
@@ -55,18 +56,24 @@ def mock_defender_get_assessments(_):
     }
 
 
-def mock_defender_get_security_contacts(_):
+def mock_defender_get_security_contacts(*args, **kwargs):
+    from prowler.providers.azure.services.defender.defender_service import (
+        NotificationsByRole,
+    )
+
     return {
         AZURE_SUBSCRIPTION_ID: {
-            "/subscriptions/resource_id": SecurityContacts(
-                resource_id="/subscriptions/resource_id",
+            "/subscriptions/resource_id": SecurityContactConfiguration(
+                id="/subscriptions/resource_id",
                 name="default",
-                emails="user@user.com, test@test.es",
+                enabled=True,
+                emails=["user@user.com", "test@test.es"],
                 phone="666666666",
-                alert_notifications_minimal_severity="High",
-                alert_notifications_state="On",
-                notified_roles=["Owner", "Contributor"],
-                notified_roles_state="On",
+                notifications_by_role=NotificationsByRole(
+                    state=True, roles=["Owner", "Contributor"]
+                ),
+                alert_minimal_severity="High",
+                attack_path_minimal_risk_level=None,
             )
         }
     }
@@ -97,6 +104,19 @@ def mock_defender_get_iot_security_solutions(_):
     }
 
 
+def mock_defender_get_jit_policies(_):
+    return {
+        AZURE_SUBSCRIPTION_ID: {
+            "policy-1": JITPolicy(
+                id="policy-1",
+                name="JITPolicy1",
+                location="eastus",
+                vm_ids=["vm-1", "vm-2"],
+            )
+        }
+    }
+
+
 @patch(
     "prowler.providers.azure.services.defender.defender_service.Defender._get_pricings",
     new=mock_defender_get_pricings,
@@ -120,6 +140,10 @@ def mock_defender_get_iot_security_solutions(_):
 @patch(
     "prowler.providers.azure.services.defender.defender_service.Defender._get_iot_security_solutions",
     new=mock_defender_get_iot_security_solutions,
+)
+@patch(
+    "prowler.providers.azure.services.defender.defender_service.Defender._get_jit_policies",
+    new=mock_defender_get_jit_policies,
 )
 class Test_Defender_Service:
     def test_get_client(self):
@@ -216,52 +240,17 @@ class Test_Defender_Service:
 
     def test_get_security_contacts(self):
         defender = Defender(set_mocked_azure_provider())
-        assert len(defender.security_contacts) == 1
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].resource_id
-            == "/subscriptions/resource_id"
-        )
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].name
-            == "default"
-        )
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].emails
-            == "user@user.com, test@test.es"
-        )
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].phone
-            == "666666666"
-        )
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].alert_notifications_minimal_severity
-            == "High"
-        )
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].alert_notifications_state
-            == "On"
-        )
-        assert defender.security_contacts[AZURE_SUBSCRIPTION_ID][
+        assert len(defender.security_contact_configurations) == 1
+        contact = defender.security_contact_configurations[AZURE_SUBSCRIPTION_ID][
             "/subscriptions/resource_id"
-        ].notified_roles == ["Owner", "Contributor"]
-        assert (
-            defender.security_contacts[AZURE_SUBSCRIPTION_ID][
-                "/subscriptions/resource_id"
-            ].notified_roles_state
-            == "On"
-        )
+        ]
+        assert contact.id == "/subscriptions/resource_id"
+        assert contact.name == "default"
+        assert contact.emails == ["user@user.com", "test@test.es"]
+        assert contact.phone == "666666666"
+        assert contact.alert_minimal_severity == "High"
+        assert contact.notifications_by_role.state is True
+        assert contact.notifications_by_role.roles == ["Owner", "Contributor"]
 
     def test_get_iot_security_solutions(self):
         defender = Defender(set_mocked_azure_provider())
@@ -284,3 +273,87 @@ class Test_Defender_Service:
             ].status
             == "Enabled"
         )
+
+    def test_get_jit_policies(self):
+        defender = Defender(set_mocked_azure_provider())
+        assert AZURE_SUBSCRIPTION_ID in defender.jit_policies
+        assert "policy-1" in defender.jit_policies[AZURE_SUBSCRIPTION_ID]
+        policy1 = defender.jit_policies[AZURE_SUBSCRIPTION_ID]["policy-1"]
+        assert policy1.id == "policy-1"
+        assert policy1.name == "JITPolicy1"
+        assert policy1.location == "eastus"
+        assert set(policy1.vm_ids) == {"vm-1", "vm-2"}
+
+
+def mock_defender_get_assessments_with_none(_):
+    """Mock Defender assessments with None and valid statuses"""
+    return {
+        AZURE_SUBSCRIPTION_ID: {
+            "Assessment None": Assesment(
+                resource_id="/subscriptions/test/assessment1",
+                resource_name="assessment-none",
+                status=None,  # None status
+            ),
+            "Assessment Healthy": Assesment(
+                resource_id="/subscriptions/test/assessment2",
+                resource_name="assessment-healthy",
+                status="Healthy",
+            ),
+            "Assessment Unhealthy": Assesment(
+                resource_id="/subscriptions/test/assessment3",
+                resource_name="assessment-unhealthy",
+                status="Unhealthy",
+            ),
+        }
+    }
+
+
+@patch(
+    "prowler.providers.azure.services.defender.defender_service.Defender._get_assessments",
+    new=mock_defender_get_assessments_with_none,
+)
+class Test_Defender_Service_Assessments_None_Handling:
+    """Test Defender service handling of None values in assessments"""
+
+    def test_assessment_with_none_status(self):
+        """Test that Defender handles assessments with None status gracefully"""
+        defender = Defender(set_mocked_azure_provider())
+
+        # Check assessment with None status
+        assessment = defender.assessments[AZURE_SUBSCRIPTION_ID]["Assessment None"]
+        assert assessment.resource_id == "/subscriptions/test/assessment1"
+        assert assessment.resource_name == "assessment-none"
+        assert assessment.status is None
+
+    def test_assessment_with_valid_status(self):
+        """Test that Defender handles assessments with valid status"""
+        defender = Defender(set_mocked_azure_provider())
+
+        # Check assessment with Healthy status
+        assessment = defender.assessments[AZURE_SUBSCRIPTION_ID]["Assessment Healthy"]
+        assert assessment.resource_id == "/subscriptions/test/assessment2"
+        assert assessment.resource_name == "assessment-healthy"
+        assert assessment.status == "Healthy"
+
+    def test_assessment_with_multiple_mixed_statuses(self):
+        """Test that Defender handles mix of None and valid statuses"""
+        defender = Defender(set_mocked_azure_provider())
+
+        # Should have all 3 assessments
+        assert len(defender.assessments[AZURE_SUBSCRIPTION_ID]) == 3
+
+        # Check None status
+        assessment_none = defender.assessments[AZURE_SUBSCRIPTION_ID]["Assessment None"]
+        assert assessment_none.status is None
+
+        # Check Healthy status
+        assessment_healthy = defender.assessments[AZURE_SUBSCRIPTION_ID][
+            "Assessment Healthy"
+        ]
+        assert assessment_healthy.status == "Healthy"
+
+        # Check Unhealthy status
+        assessment_unhealthy = defender.assessments[AZURE_SUBSCRIPTION_ID][
+            "Assessment Unhealthy"
+        ]
+        assert assessment_unhealthy.status == "Unhealthy"

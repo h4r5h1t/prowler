@@ -1,53 +1,76 @@
+import { redirect } from "next/navigation";
 import React from "react";
 
-import { InfoIcon } from "@/components/icons";
+import { getProvider } from "@/actions/providers/providers";
+import { CredentialsUpdateInfo } from "@/components/providers";
 import {
   UpdateViaCredentialsForm,
   UpdateViaRoleForm,
 } from "@/components/providers/workflow/forms";
-import { SelectViaAWS } from "@/components/providers/workflow/forms/select-via-aws/select-via-aws";
+import { UpdateViaServiceAccountForm } from "@/components/providers/workflow/forms/update-via-service-account-key-form";
+import { getProviderFormType } from "@/lib/provider-helpers";
+import { ProviderType } from "@/types/providers";
 
 interface Props {
-  searchParams: { type: string; id: string; via?: string };
+  searchParams: Promise<{
+    type: ProviderType;
+    id: string;
+    via?: string;
+    secretId?: string;
+  }>;
 }
 
-export default function UpdateCredentialsPage({ searchParams }: Props) {
-  return (
-    <>
-      {searchParams.type === "aws" && !searchParams.via && (
-        <>
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-default-700">
-              To update provider credentials,{" "}
-              <strong>
-                the same type that was originally configured must be used.
-              </strong>
-            </p>
-            <div className="flex items-center rounded-lg border border-system-warning bg-system-warning-medium p-4 text-sm dark:text-default-300">
-              <InfoIcon className="mr-2 inline h-4 w-4 flex-shrink-0" />
-              <p>
-                If the provider was configured with static credentials, updates
-                must also use static credentials. If it was configured with a
-                role, updates must use a role.
-              </p>
-            </div>
-            <p className="text-sm text-default-700">
-              To switch from static credentials to a role (or vice versa), the
-              provider must be deleted and set up again.
-            </p>
-            <SelectViaAWS initialVia={searchParams.via} />
-          </div>
-        </>
-      )}
+export default async function UpdateCredentialsPage({ searchParams }: Props) {
+  const resolvedSearchParams = await searchParams;
+  const { type: providerType, via, id: providerId } = resolvedSearchParams;
 
-      {((searchParams.type === "aws" && searchParams.via === "credentials") ||
-        searchParams.type !== "aws") && (
-        <UpdateViaCredentialsForm searchParams={searchParams} />
-      )}
+  if (!providerId) {
+    redirect("/providers");
+  }
 
-      {searchParams.type === "aws" && searchParams.via === "role" && (
-        <UpdateViaRoleForm searchParams={searchParams} />
-      )}
-    </>
-  );
+  const formType = getProviderFormType(providerType, via);
+
+  const formData = new FormData();
+  formData.append("id", providerId);
+  const providerResponse = await getProvider(formData);
+
+  if (providerResponse?.errors) {
+    redirect("/providers");
+  }
+
+  const providerUid = providerResponse?.data?.attributes?.uid;
+
+  switch (formType) {
+    case "selector":
+      return (
+        <CredentialsUpdateInfo providerType={providerType} initialVia={via} />
+      );
+
+    case "credentials":
+      return (
+        <UpdateViaCredentialsForm
+          searchParams={resolvedSearchParams}
+          providerUid={providerUid}
+        />
+      );
+
+    case "role":
+      return (
+        <UpdateViaRoleForm
+          searchParams={resolvedSearchParams}
+          providerUid={providerUid}
+        />
+      );
+
+    case "service-account":
+      return (
+        <UpdateViaServiceAccountForm
+          searchParams={resolvedSearchParams}
+          providerUid={providerUid}
+        />
+      );
+
+    default:
+      return null;
+  }
 }

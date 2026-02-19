@@ -1,140 +1,173 @@
-import { Spacer } from "@nextui-org/react";
-import { format, subDays } from "date-fns";
-import React, { Suspense } from "react";
+import { Suspense } from "react";
 
-import { getFindings, getMetadataInfo } from "@/actions/findings";
+import {
+  getFindingById,
+  getFindings,
+  getLatestFindings,
+  getLatestMetadataInfo,
+  getMetadataInfo,
+} from "@/actions/findings";
 import { getProviders } from "@/actions/providers";
 import { getScans } from "@/actions/scans";
-import { filterFindings } from "@/components/filters/data-filters";
-import { FilterControls } from "@/components/filters/filter-controls";
+import { FindingDetailsSheet } from "@/components/findings";
+import { FindingsFilters } from "@/components/findings/findings-filters";
 import {
-  ColumnFindings,
+  FindingsTableWithSelection,
   SkeletonTableFindings,
 } from "@/components/findings/table";
 import { ContentLayout } from "@/components/ui";
-import { DataTable, DataTableFilterCustom } from "@/components/ui/table";
-import { createDict } from "@/lib";
-import { ProviderProps } from "@/types";
-import { FindingProps, ScanProps, SearchParamsProps } from "@/types/components";
+import { FilterTransitionWrapper } from "@/contexts";
+import {
+  createDict,
+  createScanDetailsMapping,
+  extractFiltersAndQuery,
+  extractSortAndKey,
+  hasDateOrScanFilter,
+} from "@/lib";
+import {
+  createProviderDetailsMappingById,
+  extractProviderIds,
+} from "@/lib/provider-helpers";
+import { ScanEntity, ScanProps } from "@/types";
+import { FindingProps, SearchParamsProps } from "@/types/components";
 
 export default async function Findings({
   searchParams,
 }: {
-  searchParams: SearchParamsProps;
+  searchParams: Promise<SearchParamsProps>;
 }) {
-  const searchParamsKey = JSON.stringify(searchParams || {});
-  const sort = searchParams.sort?.toString();
-
-  // Make sure the sort is correctly encoded
-  const encodedSort = sort?.replace(/^\+/, "");
-
-  const twoDaysAgo = format(subDays(new Date(), 2), "yyyy-MM-dd");
+  const resolvedSearchParams = await searchParams;
+  const { encodedSort } = extractSortAndKey(resolvedSearchParams);
+  const { filters, query } = extractFiltersAndQuery(resolvedSearchParams);
 
   // Check if the searchParams contain any date or scan filter
-  const hasDateOrScanFilter = Object.keys(searchParams).some(
-    (key) => key.includes("inserted_at") || key.includes("scan__in"),
-  );
+  const hasDateOrScan = hasDateOrScanFilter(resolvedSearchParams);
 
-  // Default filters for getMetadataInfo
-  const defaultFilters: Record<string, string> = hasDateOrScanFilter
-    ? {} // Do not apply default filters if there are date or scan filters
-    : { "filter[inserted_at__gte]": twoDaysAgo };
+  // Check if there's a specific finding ID to fetch
+  const findingId = resolvedSearchParams.id?.toString();
 
-  // Extract all filter parameters and combine with default filters
-  const filters: Record<string, string> = {
-    ...defaultFilters,
-    ...Object.fromEntries(
-      Object.entries(searchParams)
-        .filter(([key]) => key.startsWith("filter["))
-        .map(([key, value]) => [
-          key,
-          Array.isArray(value) ? value.join(",") : value?.toString() || "",
-        ]),
-    ),
-  };
+  const [metadataInfoData, providersData, scansData, findingByIdData] =
+    await Promise.all([
+      (hasDateOrScan ? getMetadataInfo : getLatestMetadataInfo)({
+        query,
+        sort: encodedSort,
+        filters,
+      }),
+      getProviders({ pageSize: 50 }),
+      getScans({ pageSize: 50 }),
+      findingId
+        ? getFindingById(findingId, "resources,scan.provider")
+        : Promise.resolve(null),
+    ]);
 
-  const query = filters["filter[search]"] || "";
+  // Process the finding data to match the expected structure
+  const processedFinding = findingByIdData?.data
+    ? (() => {
+        const finding = findingByIdData.data;
+        const included = findingByIdData.included || [];
 
-  const [metadataInfoData, providersData, scansData] = await Promise.all([
-    getMetadataInfo({
-      query,
-      sort: encodedSort,
-      filters,
-    }),
-    getProviders({}),
-    getScans({}),
-  ]);
+        // Build dictionaries from included data
+        type IncludedItem = {
+          type: string;
+          id: string;
+          attributes: Record<string, unknown>;
+          relationships?: {
+            provider?: { data?: { id: string } };
+          };
+        };
 
-  // Extract unique regions and services from the new endpoint
+        const resourceDict: Record<string, unknown> = {};
+        const scanDict: Record<string, IncludedItem> = {};
+        const providerDict: Record<string, unknown> = {};
+
+        included.forEach((item: IncludedItem) => {
+          if (item.type === "resources") {
+            resourceDict[item.id] = {
+              id: item.id,
+              attributes: item.attributes,
+            };
+          } else if (item.type === "scans") {
+            scanDict[item.id] = item;
+          } else if (item.type === "providers") {
+            providerDict[item.id] = {
+              id: item.id,
+              attributes: item.attributes,
+            };
+          }
+        });
+
+        const scanId = finding.relationships?.scan?.data?.id;
+        const resourceId = finding.relationships?.resources?.data?.[0]?.id;
+        const scan = scanId ? scanDict[scanId] : undefined;
+        const providerId = scan?.relationships?.provider?.data?.id;
+        const resource = resourceId ? resourceDict[resourceId] : undefined;
+        const provider = providerId ? providerDict[providerId] : undefined;
+
+        return {
+          ...finding,
+          relationships: {
+            scan: scan
+              ? { data: scan, attributes: scan.attributes }
+              : undefined,
+            resource: resource,
+            provider: provider,
+          },
+        } as FindingProps;
+      })()
+    : null;
+
+  // Extract unique regions, services, categories, groups from the new endpoint
   const uniqueRegions = metadataInfoData?.data?.attributes?.regions || [];
   const uniqueServices = metadataInfoData?.data?.attributes?.services || [];
   const uniqueResourceTypes =
     metadataInfoData?.data?.attributes?.resource_types || [];
-  // Get findings data
+  const uniqueCategories = metadataInfoData?.data?.attributes?.categories || [];
+  const uniqueGroups = metadataInfoData?.data?.attributes?.groups || [];
 
-  // Extract provider UIDs
-  const providerUIDs = Array.from(
-    new Set(
-      providersData?.data
-        ?.map((provider: ProviderProps) => provider.attributes.uid)
-        .filter(Boolean),
-    ),
-  );
+  // Extract provider IDs and details using helper functions
+  const providerIds = providersData ? extractProviderIds(providersData) : [];
+  const providerDetails = providersData
+    ? createProviderDetailsMappingById(providerIds, providersData)
+    : [];
 
   // Extract scan UUIDs with "completed" state and more than one resource
-  const completedScans = scansData?.data
-    ?.filter(
-      (scan: ScanProps) =>
-        scan.attributes.state === "completed" &&
-        scan.attributes.unique_resource_count > 1,
-    )
-    .map((scan: ScanProps) => ({
-      id: scan.id,
-      name: scan.attributes.name,
-    }));
+  const completedScans = scansData?.data?.filter(
+    (scan: ScanProps) =>
+      scan.attributes.state === "completed" &&
+      scan.attributes.unique_resource_count > 1,
+  );
 
   const completedScanIds =
     completedScans?.map((scan: ScanProps) => scan.id) || [];
 
+  const scanDetails = createScanDetailsMapping(
+    completedScans || [],
+    providersData,
+  ) as { [uid: string]: ScanEntity }[];
+
   return (
-    <ContentLayout title="Findings" icon="carbon:data-view-alt">
-      <FilterControls search date />
-      <Spacer y={8} />
-      <DataTableFilterCustom
-        filters={[
-          ...filterFindings,
-          {
-            key: "region__in",
-            labelCheckboxGroup: "Regions",
-            values: uniqueRegions,
-          },
-          {
-            key: "service__in",
-            labelCheckboxGroup: "Services",
-            values: uniqueServices,
-          },
-          {
-            key: "resource_type__in",
-            labelCheckboxGroup: "Resource Type",
-            values: uniqueResourceTypes,
-          },
-          {
-            key: "provider_uid__in",
-            labelCheckboxGroup: "Provider UID",
-            values: providerUIDs,
-          },
-          {
-            key: "scan__in",
-            labelCheckboxGroup: "Scan ID",
-            values: completedScanIds,
-          },
-        ]}
-        defaultOpen={true}
-      />
-      <Spacer y={8} />
-      <Suspense key={searchParamsKey} fallback={<SkeletonTableFindings />}>
-        <SSRDataTable searchParams={searchParams} />
-      </Suspense>
+    <ContentLayout title="Findings" icon="lucide:tag">
+      <FilterTransitionWrapper>
+        <div className="mb-6">
+          <FindingsFilters
+            providers={providersData?.data || []}
+            providerIds={providerIds}
+            providerDetails={providerDetails}
+            completedScans={completedScans || []}
+            completedScanIds={completedScanIds}
+            scanDetails={scanDetails}
+            uniqueRegions={uniqueRegions}
+            uniqueServices={uniqueServices}
+            uniqueResourceTypes={uniqueResourceTypes}
+            uniqueCategories={uniqueCategories}
+            uniqueGroups={uniqueGroups}
+          />
+        </div>
+        <Suspense fallback={<SkeletonTableFindings />}>
+          <SSRDataTable searchParams={resolvedSearchParams} />
+        </Suspense>
+      </FilterTransitionWrapper>
+      {processedFinding && <FindingDetailsSheet finding={processedFinding} />}
     </ContentLayout>
   );
 }
@@ -147,38 +180,19 @@ const SSRDataTable = async ({
   const page = parseInt(searchParams.page?.toString() || "1", 10);
   const pageSize = parseInt(searchParams.pageSize?.toString() || "10", 10);
   const defaultSort = "severity,status,-inserted_at";
-  const sort = searchParams.sort?.toString() || defaultSort;
 
-  // Make sure the sort is correctly encoded
-  const encodedSort = sort.replace(/^\+/, "");
+  const { encodedSort } = extractSortAndKey({
+    ...searchParams,
+    sort: searchParams.sort ?? defaultSort,
+  });
 
-  const twoDaysAgo = format(subDays(new Date(), 2), "yyyy-MM-dd");
-
+  const { filters, query } = extractFiltersAndQuery(searchParams);
   // Check if the searchParams contain any date or scan filter
-  const hasDateOrScanFilter = Object.keys(searchParams).some(
-    (key) => key.includes("inserted_at") || key.includes("scan__in"),
-  );
+  const hasDateOrScan = hasDateOrScanFilter(searchParams);
 
-  // Default filters for getFindings
-  const defaultFilters: Record<string, string> = hasDateOrScanFilter
-    ? {} // Do not apply default filters if there are date or scan filters
-    : { "filter[inserted_at__gte]": twoDaysAgo };
+  const fetchFindings = hasDateOrScan ? getFindings : getLatestFindings;
 
-  const filters: Record<string, string> = {
-    ...defaultFilters,
-    ...Object.fromEntries(
-      Object.entries(searchParams)
-        .filter(([key]) => key.startsWith("filter["))
-        .map(([key, value]) => [
-          key,
-          Array.isArray(value) ? value.join(",") : value?.toString() || "",
-        ]),
-    ),
-  };
-
-  const query = filters["filter[search]"] || "";
-
-  const findingsData = await getFindings({
+  const findingsData = await fetchFindings({
     query,
     page,
     sort: encodedSort,
@@ -215,13 +229,12 @@ const SSRDataTable = async ({
   return (
     <>
       {findingsData?.errors && (
-        <div className="mb-4 flex rounded-lg border border-red-500 bg-red-100 p-2 text-small text-red-700">
+        <div className="text-small mb-4 flex rounded-lg border border-red-500 bg-red-100 p-2 text-red-700">
           <p className="mr-2 font-semibold">Error:</p>
           <p>{findingsData.errors[0].detail}</p>
         </div>
       )}
-      <DataTable
-        columns={ColumnFindings}
+      <FindingsTableWithSelection
         data={expandedResponse?.data || []}
         metadata={findingsData?.meta}
       />

@@ -1,14 +1,15 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useRouter } from "next/navigation";
 import React, { Dispatch, SetStateAction } from "react";
 import { useForm } from "react-hook-form";
 import * as z from "zod";
 
 import { deleteProviderGroup } from "@/actions/manage-groups/manage-groups";
 import { DeleteIcon } from "@/components/icons";
+import { Button } from "@/components/shadcn";
 import { useToast } from "@/components/ui";
-import { CustomButton } from "@/components/ui/custom";
 import { Form } from "@/components/ui/form";
 
 const formSchema = z.object({
@@ -26,6 +27,7 @@ export const DeleteGroupForm = ({
     resolver: zodResolver(formSchema),
   });
   const { toast } = useToast();
+  const router = useRouter();
   const isLoading = form.formState.isSubmitting;
 
   async function onSubmitClient(formData: FormData) {
@@ -46,6 +48,7 @@ export const DeleteGroupForm = ({
         title: "Success!",
         description: "The provider group was removed successfully.",
       });
+      router.push("/manage-groups");
     }
     setIsOpen(false); // Close the modal on success
   }
@@ -54,32 +57,26 @@ export const DeleteGroupForm = ({
     <Form {...form}>
       <form action={onSubmitClient}>
         <input type="hidden" name="id" value={groupId} />
-        <div className="flex w-full justify-center sm:space-x-6">
-          <CustomButton
+        <div className="flex w-full justify-end gap-4">
+          <Button
             type="button"
-            ariaLabel="Cancel"
-            className="w-full bg-transparent"
-            variant="faded"
+            variant="ghost"
             size="lg"
-            radius="lg"
-            onPress={() => setIsOpen(false)}
-            isDisabled={isLoading}
+            onClick={() => setIsOpen(false)}
+            disabled={isLoading}
           >
-            <span>Cancel</span>
-          </CustomButton>
+            Cancel
+          </Button>
 
-          <CustomButton
+          <Button
             type="submit"
-            ariaLabel="Delete"
-            className="w-full"
-            variant="solid"
-            color="danger"
+            variant="destructive"
             size="lg"
-            isLoading={isLoading}
-            startContent={!isLoading && <DeleteIcon size={24} />}
+            disabled={isLoading}
           >
-            {isLoading ? <>Loading</> : <span>Delete</span>}
-          </CustomButton>
+            {!isLoading && <DeleteIcon size={24} />}
+            {isLoading ? "Loading" : "Delete"}
+          </Button>
         </div>
       </form>
     </Form>

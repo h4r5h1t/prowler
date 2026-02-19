@@ -1,25 +1,26 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
-import * as z from "zod";
+import { z } from "zod";
 
+import { addProvider } from "@/actions/providers/providers";
+import { ProviderTitleDocs } from "@/components/providers/workflow/provider-title-docs";
+import { Button } from "@/components/shadcn";
 import { useToast } from "@/components/ui";
-import { CustomButton, CustomInput } from "@/components/ui/custom";
+import { CustomInput } from "@/components/ui/custom";
 import { Form } from "@/components/ui/form";
-import { ProviderType } from "@/types";
+import { addProviderFormSchema, ApiError, ProviderType } from "@/types";
 
-import { addProvider } from "../../../../actions/providers/providers";
-import { addProviderFormSchema, ApiError } from "../../../../types";
 import { RadioGroupProvider } from "../../radio-group-provider";
-import { ProviderTitleDocs } from "../provider-title-docs";
+
 export type FormValues = z.infer<typeof addProviderFormSchema>;
 
 // Helper function for labels and placeholders
-const getProviderFieldDetails = (providerType?: string) => {
+const getProviderFieldDetails = (providerType?: ProviderType) => {
   switch (providerType) {
     case "aws":
       return {
@@ -45,6 +46,31 @@ const getProviderFieldDetails = (providerType?: string) => {
       return {
         label: "Domain ID",
         placeholder: "e.g. your-domain.onmicrosoft.com",
+      };
+    case "github":
+      return {
+        label: "Username/Organization",
+        placeholder: "e.g. username or organization-name",
+      };
+    case "iac":
+      return {
+        label: "Repository URL",
+        placeholder: "e.g. https://github.com/user/repo",
+      };
+    case "oraclecloud":
+      return {
+        label: "Tenancy OCID",
+        placeholder: "e.g. ocid1.tenancy.oc1..aaaaaaa...",
+      };
+    case "mongodbatlas":
+      return {
+        label: "Organization ID",
+        placeholder: "e.g. 5f43a8c4e1234567890abcde",
+      };
+    case "alibabacloud":
+      return {
+        label: "Account ID",
+        placeholder: "e.g. 1234567890123456",
       };
     default:
       return {
@@ -130,19 +156,25 @@ export const ConnectAccountForm = () => {
 
         router.push(`/providers/add-credentials?type=${providerType}&id=${id}`);
       }
-    } catch (error: any) {
-      // eslint-disable-next-line no-console
+    } catch (error: unknown) {
       console.error("Error during submission:", error);
       toast({
         variant: "destructive",
         title: "Submission Error",
-        description: error.message || "Something went wrong. Please try again.",
+        description:
+          error instanceof Error
+            ? error.message
+            : "Something went wrong. Please try again.",
       });
     }
   };
 
   const handleBackStep = () => {
     setPrevStep((prev) => prev - 1);
+    //Deselect the providerType if the user is going back to the first step
+    if (prevStep === 2) {
+      form.setValue("providerType", undefined as unknown as ProviderType);
+    }
     // Reset the providerUid and providerAlias fields when going back
     form.setValue("providerUid", "");
     form.setValue("providerAlias", "");
@@ -158,7 +190,7 @@ export const ConnectAccountForm = () => {
     <Form {...form}>
       <form
         onSubmit={form.handleSubmit(onSubmitClient)}
-        className="flex flex-col space-y-4"
+        className="flex flex-col gap-4"
       >
         {/* Step 1: Provider selection */}
         {prevStep === 1 && (
@@ -171,7 +203,7 @@ export const ConnectAccountForm = () => {
         {/* Step 2: UID, alias, and credentials (if AWS) */}
         {prevStep === 2 && (
           <>
-            <ProviderTitleDocs providerType={providerType as ProviderType} />
+            <ProviderTitleDocs providerType={providerType} />
             <CustomInput
               control={form.control}
               name="providerUid"
@@ -181,7 +213,6 @@ export const ConnectAccountForm = () => {
               placeholder={providerFieldDetails.placeholder}
               variant="bordered"
               isRequired
-              isInvalid={!!form.formState.errors.providerUid}
             />
             <CustomInput
               control={form.control}
@@ -192,42 +223,39 @@ export const ConnectAccountForm = () => {
               placeholder="Enter the provider alias"
               variant="bordered"
               isRequired={false}
-              isInvalid={!!form.formState.errors.providerAlias}
             />
           </>
         )}
         {/* Navigation buttons */}
-        <div className="flex w-full justify-end sm:space-x-6">
+        <div className="flex w-full justify-end gap-4">
           {/* Show "Back" button only in Step 2 */}
           {prevStep === 2 && (
-            <CustomButton
+            <Button
               type="button"
-              ariaLabel="Back"
-              className="w-1/2 bg-transparent"
-              variant="faded"
+              variant="ghost"
               size="lg"
-              radius="lg"
-              onPress={handleBackStep}
-              startContent={!isLoading && <ChevronLeftIcon size={24} />}
-              isDisabled={isLoading}
+              onClick={handleBackStep}
+              disabled={isLoading}
             >
-              <span>Back</span>
-            </CustomButton>
+              {!isLoading && <ChevronLeftIcon size={24} />}
+              Back
+            </Button>
           )}
           {/* Show "Next" button in Step 2 */}
           {prevStep === 2 && (
-            <CustomButton
+            <Button
               type="submit"
-              ariaLabel="Next"
-              className="w-1/2"
-              variant="solid"
-              color="action"
+              variant="default"
               size="lg"
-              isLoading={isLoading}
-              endContent={!isLoading && <ChevronRightIcon size={24} />}
+              disabled={isLoading}
             >
-              {isLoading ? <>Loading</> : <span>Next</span>}
-            </CustomButton>
+              {isLoading ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <ChevronRightIcon size={24} />
+              )}
+              {isLoading ? "Loading" : "Next"}
+            </Button>
           )}
         </div>
       </form>

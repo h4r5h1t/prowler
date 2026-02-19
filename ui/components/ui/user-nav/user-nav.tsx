@@ -1,98 +1,73 @@
 "use client";
 
-import { LogOut, User } from "lucide-react";
-import Link from "next/link";
+import { LogOut } from "lucide-react";
+import { useSession } from "next-auth/react";
 
 import { logOut } from "@/actions/auth";
+import { Button } from "@/components/shadcn/button/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/shadcn/tooltip";
 import {
   Avatar,
   AvatarFallback,
   AvatarImage,
 } from "@/components/ui/avatar/avatar";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip/tooltip";
-import { UserProfileProps } from "@/types";
+import { CustomLink } from "@/components/ui/custom/custom-link";
 
-import { Button } from "../button/button";
+export const UserNav = () => {
+  const { data: session } = useSession();
 
-export const UserNav = ({ user }: { user?: UserProfileProps }) => {
-  if (!user || !user.data) return null;
+  if (!session?.user) return null;
 
-  const { name, email, company_name } = user.data.attributes;
+  const { name } = session.user;
+
+  const initials = name.includes(" ")
+    ? name
+        .split(" ")
+        .map((word) => word.charAt(0))
+        .join("")
+    : name.charAt(0);
 
   return (
-    <DropdownMenu>
-      <TooltipProvider disableHoverableContent>
-        <Tooltip delayDuration={100}>
-          <TooltipTrigger asChild>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                className="relative h-8 w-8 rounded-full"
-              >
-                <Avatar className="h-8 w-8">
-                  <AvatarImage src="#" alt="Avatar" />
-                  <AvatarFallback className="bg-transparent text-xs font-bold">
-                    {name.includes(" ")
-                      ? name
-                          .split(" ")
-                          .map((word) => word.charAt(0))
-                          .join("")
-                      : name.charAt(0)}
-                  </AvatarFallback>
-                </Avatar>
-              </Button>
-            </DropdownMenuTrigger>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Profile</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+    <div className="flex items-center gap-2">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            className="border-border-input-primary-fill rounded-full"
+            asChild
+          >
+            <CustomLink href="/profile" target="_self" aria-label="Account">
+              <Avatar className="h-8 w-8">
+                <AvatarImage src="#" alt="Avatar" />
+                <AvatarFallback className="bg-transparent text-xs font-bold">
+                  {initials}
+                </AvatarFallback>
+              </Avatar>
+            </CustomLink>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Account Settings</TooltipContent>
+      </Tooltip>
 
-      <DropdownMenuContent className="w-56" align="end" forceMount>
-        <DropdownMenuLabel className="font-normal">
-          <div className="flex flex-col space-y-1">
-            <p className="text-small font-medium leading-none">
-              {name}
-              {company_name && (
-                <span className="text-xs">{` | ${company_name}`}</span>
-              )}
-            </p>
-            <p className="text-muted-foreground text-xs leading-none">
-              {email}
-            </p>
-          </div>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          <DropdownMenuItem disabled className="hover:cursor-pointer" asChild>
-            <Link href="/profile" className="flex items-center">
-              <User className="text-muted-foreground mr-3 h-4 w-4" />
-              Account
-            </Link>
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          className="hover:cursor-pointer"
-          onClick={() => logOut()}
-        >
-          <LogOut className="text-muted-foreground mr-3 h-4 w-4" />
-          Sign out
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="border-border-input-primary-fill rounded-full"
+            onClick={() => logOut()}
+            aria-label="Sign out"
+          >
+            <LogOut />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Sign Out</TooltipContent>
+      </Tooltip>
+    </div>
   );
 };

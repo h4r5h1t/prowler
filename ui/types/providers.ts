@@ -1,4 +1,37 @@
-export type ProviderType = "aws" | "azure" | "m365" | "gcp" | "kubernetes";
+export const PROVIDER_TYPES = [
+  "aws",
+  "azure",
+  "gcp",
+  "kubernetes",
+  "m365",
+  "mongodbatlas",
+  "github",
+  "iac",
+  "oraclecloud",
+  "alibabacloud",
+] as const;
+
+export type ProviderType = (typeof PROVIDER_TYPES)[number];
+
+export const PROVIDER_DISPLAY_NAMES: Record<ProviderType, string> = {
+  aws: "AWS",
+  azure: "Azure",
+  gcp: "Google Cloud",
+  kubernetes: "Kubernetes",
+  m365: "Microsoft 365",
+  mongodbatlas: "MongoDB Atlas",
+  github: "GitHub",
+  iac: "Infrastructure as Code",
+  oraclecloud: "Oracle Cloud Infrastructure",
+  alibabacloud: "Alibaba Cloud",
+};
+
+export function getProviderDisplayName(providerId: string): string {
+  return (
+    PROVIDER_DISPLAY_NAMES[providerId.toLowerCase() as ProviderType] ||
+    providerId
+  );
+}
 
 export interface ProviderProps {
   id: string;
@@ -45,23 +78,37 @@ export interface ProviderProps {
   groupNames?: string[];
 }
 
-export interface ProviderOverviewProps {
-  data: {
-    type: "provider-overviews";
-    id: ProviderType;
-    attributes: {
-      findings: {
-        pass: number;
-        fail: number;
-        manual: number;
-        total: number;
-      };
-      resources: {
-        total: number;
-      };
-    };
-  }[];
+export interface ProviderEntity {
+  provider: ProviderType;
+  uid: string;
+  alias: string | null;
+}
+
+export interface ProviderConnectionStatus {
+  label: string;
+  value: string;
+}
+
+export interface ProvidersApiResponse {
+  links: {
+    first: string;
+    last: string;
+    next: string | null;
+    prev: string | null;
+  };
+  data: ProviderProps[];
+  included?: Array<{
+    type: string;
+    id: string;
+    attributes: Record<string, unknown>;
+    relationships?: Record<string, unknown>;
+  }>;
   meta: {
+    pagination: {
+      page: number;
+      pages: number;
+      count: number;
+    };
     version: string;
   };
 }

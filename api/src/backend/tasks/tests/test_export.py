@@ -1,11 +1,15 @@
 import os
+import uuid
 import zipfile
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 from tasks.jobs.export import (
     _compress_output_files,
+    _generate_compliance_output_directory,
     _generate_output_directory,
     _upload_to_s3,
     get_s3_client,
@@ -14,8 +18,9 @@ from tasks.jobs.export import (
 
 @pytest.mark.django_db
 class TestOutputs:
-    def test_compress_output_files_creates_zip(self, tmp_path):
-        output_dir = tmp_path / "output"
+    def test_compress_output_files_creates_zip(self, tmpdir):
+        base_tmp = Path(str(tmpdir.mkdir("compress_output")))
+        output_dir = base_tmp / "output"
         output_dir.mkdir()
         file_path = output_dir / "result.csv"
         file_path.write_text("data")
@@ -54,54 +59,67 @@ class TestOutputs:
 
     @patch("tasks.jobs.export.get_s3_client")
     @patch("tasks.jobs.export.base")
-    def test_upload_to_s3_success(self, mock_base, mock_get_client, tmp_path):
+    def test_upload_to_s3_success(self, mock_base, mock_get_client, tmpdir):
         mock_base.DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET = "test-bucket"
 
-        zip_path = tmp_path / "outputs.zip"
+        base_tmp = Path(str(tmpdir.mkdir("upload_success")))
+        zip_path = base_tmp / "outputs.zip"
         zip_path.write_bytes(b"dummy")
 
-        compliance_dir = tmp_path / "compliance"
+        compliance_dir = base_tmp / "compliance"
         compliance_dir.mkdir()
-        compliance_file = compliance_dir / "report.csv"
-        compliance_file.write_text("ok")
+        (compliance_dir / "report.csv").write_text("ok")
 
         client_mock = MagicMock()
         mock_get_client.return_value = client_mock
 
-        result = _upload_to_s3("tenant-id", str(zip_path), "scan-id")
+        result = _upload_to_s3(
+            "tenant-id",
+            "scan-id",
+            str(zip_path),
+            "outputs.zip",
+        )
 
         expected_uri = "s3://test-bucket/tenant-id/scan-id/outputs.zip"
         assert result == expected_uri
-
-        assert client_mock.upload_file.call_count == 2
+        client_mock.upload_file.assert_called_once_with(
+            Filename=str(zip_path),
+            Bucket="test-bucket",
+            Key="tenant-id/scan-id/outputs.zip",
+        )
 
     @patch("tasks.jobs.export.get_s3_client")
     @patch("tasks.jobs.export.base")
     def test_upload_to_s3_missing_bucket(self, mock_base, mock_get_client):
         mock_base.DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET = ""
-        result = _upload_to_s3("tenant", "/tmp/fake.zip", "scan")
+        result = _upload_to_s3("tenant", "scan", "/tmp/fake.zip", "fake.zip")
         assert result is None
 
     @patch("tasks.jobs.export.get_s3_client")
     @patch("tasks.jobs.export.base")
-    def test_upload_to_s3_skips_non_files(self, mock_base, mock_get_client, tmp_path):
+    def test_upload_to_s3_skips_non_files(self, mock_base, mock_get_client, tmpdir):
         mock_base.DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET = "test-bucket"
-        zip_path = tmp_path / "results.zip"
+        base_tmp = Path(str(tmpdir.mkdir("upload_skips_non_files")))
+
+        zip_path = base_tmp / "results.zip"
         zip_path.write_bytes(b"zip")
 
-        compliance_dir = tmp_path / "compliance"
+        compliance_dir = base_tmp / "compliance"
         compliance_dir.mkdir()
         (compliance_dir / "subdir").mkdir()
 
         client_mock = MagicMock()
         mock_get_client.return_value = client_mock
 
-        result = _upload_to_s3("tenant", str(zip_path), "scan")
+        result = _upload_to_s3(
+            "tenant",
+            "scan",
+            str(compliance_dir / "subdir"),
+            "compliance/subdir",
+        )
 
-        expected_uri = "s3://test-bucket/tenant/scan/results.zip"
-        assert result == expected_uri
-
-        client_mock.upload_file.assert_called_once()
+        assert result is None
+        client_mock.upload_file.assert_not_called()
 
     @patch(
         "tasks.jobs.export.get_s3_client",
@@ -110,33 +128,118 @@ class TestOutputs:
     @patch("tasks.jobs.export.base")
     @patch("tasks.jobs.export.logger.error")
     def test_upload_to_s3_failure_logs_error(
-        self, mock_logger, mock_base, mock_get_client, tmp_path
+        self, mock_logger, mock_base, mock_get_client, tmpdir
     ):
         mock_base.DJANGO_OUTPUT_S3_AWS_OUTPUT_BUCKET = "bucket"
-        zip_path = tmp_path / "zipfile.zip"
+
+        base_tmp = Path(str(tmpdir.mkdir("upload_failure_logs")))
+        zip_path = base_tmp / "zipfile.zip"
         zip_path.write_bytes(b"zip")
 
-        compliance_dir = tmp_path / "compliance"
+        compliance_dir = base_tmp / "compliance"
         compliance_dir.mkdir()
         (compliance_dir / "report.csv").write_text("csv")
 
-        _upload_to_s3("tenant", str(zip_path), "scan")
+        _upload_to_s3(
+            "tenant",
+            "scan",
+            str(zip_path),
+            "zipfile.zip",
+        )
         mock_logger.assert_called()
 
-    def test_generate_output_directory_creates_paths(self, tmp_path):
-        from prowler.config.config import output_file_timestamp
+    @patch("tasks.jobs.export.set_output_timestamp")
+    @patch("tasks.jobs.export.rls_transaction")
+    @patch("tasks.jobs.export.Scan")
+    def test_generate_output_directory_creates_paths(
+        self, mock_scan, mock_rls_transaction, mock_set_timestamp, tmpdir
+    ):
+        # Mock the scan object with a started_at timestamp
+        mock_scan_instance = MagicMock()
+        mock_scan_instance.started_at = datetime(2023, 6, 15, 10, 30, 45)
+        mock_scan.objects.get.return_value = mock_scan_instance
 
-        base_dir = str(tmp_path)
-        tenant_id = "t1"
-        scan_id = "s1"
+        # Mock rls_transaction as a context manager
+        mock_rls_transaction.return_value.__enter__ = MagicMock()
+        mock_rls_transaction.return_value.__exit__ = MagicMock(return_value=False)
+
+        base_tmp = Path(str(tmpdir.mkdir("generate_output")))
+        base_dir = str(base_tmp)
+        tenant_id = str(uuid.uuid4())
+        scan_id = str(uuid.uuid4())
         provider = "aws"
+        expected_timestamp = "20230615103045"
 
+        # Test _generate_output_directory (returns standard and compliance paths)
         path, compliance = _generate_output_directory(
             base_dir, provider, tenant_id, scan_id
         )
 
         assert os.path.isdir(os.path.dirname(path))
         assert os.path.isdir(os.path.dirname(compliance))
+        assert path.endswith(f"{provider}-{expected_timestamp}")
+        assert compliance.endswith(f"{provider}-{expected_timestamp}")
+        assert "/compliance/" in compliance
 
-        assert path.endswith(f"{provider}-{output_file_timestamp}")
-        assert compliance.endswith(f"{provider}-{output_file_timestamp}")
+        # Test _generate_compliance_output_directory with "threatscore"
+        threatscore = _generate_compliance_output_directory(
+            base_dir, provider, tenant_id, scan_id, compliance_framework="threatscore"
+        )
+
+        assert os.path.isdir(os.path.dirname(threatscore))
+        assert threatscore.endswith(f"{provider}-{expected_timestamp}")
+        assert "/threatscore/" in threatscore
+
+        # Test _generate_compliance_output_directory with "ens"
+        ens = _generate_compliance_output_directory(
+            base_dir, provider, tenant_id, scan_id, compliance_framework="ens"
+        )
+
+        assert os.path.isdir(os.path.dirname(ens))
+        assert ens.endswith(f"{provider}-{expected_timestamp}")
+        assert "/ens/" in ens
+
+    @patch("tasks.jobs.export.set_output_timestamp")
+    @patch("tasks.jobs.export.rls_transaction")
+    @patch("tasks.jobs.export.Scan")
+    def test_generate_output_directory_invalid_character(
+        self, mock_scan, mock_rls_transaction, mock_set_timestamp, tmpdir
+    ):
+        # Mock the scan object with a started_at timestamp
+        mock_scan_instance = MagicMock()
+        mock_scan_instance.started_at = datetime(2023, 6, 15, 10, 30, 45)
+        mock_scan.objects.get.return_value = mock_scan_instance
+
+        # Mock rls_transaction as a context manager
+        mock_rls_transaction.return_value.__enter__ = MagicMock()
+        mock_rls_transaction.return_value.__exit__ = MagicMock(return_value=False)
+
+        base_tmp = Path(str(tmpdir.mkdir("generate_output")))
+        base_dir = str(base_tmp)
+        tenant_id = str(uuid.uuid4())
+        scan_id = str(uuid.uuid4())
+        provider = "aws/test@check"
+        expected_timestamp = "20230615103045"
+
+        # Test provider name sanitization with _generate_output_directory
+        path, compliance = _generate_output_directory(
+            base_dir, provider, tenant_id, scan_id
+        )
+
+        assert os.path.isdir(os.path.dirname(path))
+        assert os.path.isdir(os.path.dirname(compliance))
+        assert path.endswith(f"aws-test-check-{expected_timestamp}")
+        assert compliance.endswith(f"aws-test-check-{expected_timestamp}")
+
+        # Test provider name sanitization with _generate_compliance_output_directory
+        threatscore = _generate_compliance_output_directory(
+            base_dir, provider, tenant_id, scan_id, compliance_framework="threatscore"
+        )
+        ens = _generate_compliance_output_directory(
+            base_dir, provider, tenant_id, scan_id, compliance_framework="ens"
+        )
+
+        assert os.path.isdir(os.path.dirname(threatscore))
+        assert os.path.isdir(os.path.dirname(ens))
+        assert threatscore.endswith(f"aws-test-check-{expected_timestamp}")
+        assert ens.endswith(f"aws-test-check-{expected_timestamp}")

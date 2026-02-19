@@ -7,12 +7,13 @@ import * as z from "zod";
 
 import { deleteProvider } from "@/actions/providers";
 import { DeleteIcon } from "@/components/icons";
+import { Button } from "@/components/shadcn";
 import { useToast } from "@/components/ui";
-import { CustomButton } from "@/components/ui/custom";
 import { Form } from "@/components/ui/form";
+import { ProviderCredentialFields } from "@/lib/provider-credentials/provider-credential-fields";
 
 const formSchema = z.object({
-  providerId: z.string(),
+  [ProviderCredentialFields.PROVIDER_ID]: z.string(),
 });
 
 export const DeleteForm = ({
@@ -53,33 +54,31 @@ export const DeleteForm = ({
   return (
     <Form {...form}>
       <form action={onSubmitClient}>
-        <input type="hidden" name="id" value={providerId} />
-        <div className="flex w-full justify-center sm:space-x-6">
-          <CustomButton
+        <input
+          type="hidden"
+          name={ProviderCredentialFields.PROVIDER_ID}
+          value={providerId}
+        />
+        <div className="flex w-full justify-end gap-4">
+          <Button
             type="button"
-            ariaLabel="Cancel"
-            className="w-full bg-transparent"
-            variant="faded"
+            variant="ghost"
             size="lg"
-            radius="lg"
-            onPress={() => setIsOpen(false)}
-            isDisabled={isLoading}
+            onClick={() => setIsOpen(false)}
+            disabled={isLoading}
           >
-            <span>Cancel</span>
-          </CustomButton>
+            Cancel
+          </Button>
 
-          <CustomButton
+          <Button
             type="submit"
-            ariaLabel="Delete"
-            className="w-full"
-            variant="solid"
-            color="danger"
+            variant="destructive"
             size="lg"
-            isLoading={isLoading}
-            startContent={!isLoading && <DeleteIcon size={24} />}
+            disabled={isLoading}
           >
-            {isLoading ? <>Loading</> : <span>Delete</span>}
-          </CustomButton>
+            {!isLoading && <DeleteIcon size={24} />}
+            {isLoading ? "Loading" : "Delete"}
+          </Button>
         </div>
       </form>
     </Form>

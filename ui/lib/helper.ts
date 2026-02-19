@@ -1,12 +1,58 @@
-import { getComplianceCsv, getExportsZip } from "@/actions/scans";
+import {
+  getComplianceCsv,
+  getCompliancePdfReport,
+  getExportsZip,
+} from "@/actions/scans";
 import { getTask } from "@/actions/task";
 import { auth } from "@/auth.config";
 import { useToast } from "@/components/ui";
+import {
+  COMPLIANCE_REPORT_DISPLAY_NAMES,
+  type ComplianceReportType,
+} from "@/lib/compliance/compliance-report-types";
 import { AuthSocialProvider, MetaDataProps, PermissionInfo } from "@/types";
 
 export const baseUrl = process.env.AUTH_URL || "http://localhost:3000";
-export const apiBaseUrl = process.env.API_BASE_URL;
+export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
 
+/**
+ * Extracts a form value from a FormData object
+ * @param formData - The FormData object to extract from
+ * @param field - The name of the field to extract
+ * @returns The value of the field
+ */
+export const getFormValue = (formData: FormData, field: string) =>
+  formData.get(field);
+
+/**
+ * Filters out empty values from an object
+ * @param obj - Object to filter
+ * @returns New object with empty values removed
+ * Avoids sending empty values to the API
+ */
+export function filterEmptyValues(
+  obj: Record<string, any>,
+): Record<string, any> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([_, value]) => {
+      // Keep number 0 and boolean false as they are valid values
+      if (value === 0 || value === false) return true;
+
+      // Filter out null, undefined, empty strings, and empty arrays
+      if (value === null || value === undefined) return false;
+      if (typeof value === "string" && value.trim() === "") return false;
+      if (Array.isArray(value) && value.length === 0) return false;
+
+      return true;
+    }),
+  );
+}
+
+/**
+ * Returns the authentication headers for API requests
+ * @param options - Optional configuration options
+ * @returns Authentication headers with Accept and Authorization
+ */
 export const getAuthHeaders = async (options?: { contentType?: boolean }) => {
   const session = await auth();
 
@@ -61,14 +107,22 @@ export const downloadScanZip = async (
 ) => {
   const result = await getExportsZip(scanId);
 
-  if (result?.success && result?.data) {
+  if (result?.pending) {
+    toast({
+      title: "The report is still being generated",
+      description: "Please try again in a few minutes.",
+    });
+    return;
+  }
+
+  if (result?.success && result.data) {
     const binaryString = window.atob(result.data);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i);
     }
-    const blob = new Blob([bytes], { type: "application/zip" });
 
+    const blob = new Blob([bytes], { type: "application/zip" });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -82,50 +136,114 @@ export const downloadScanZip = async (
       title: "Download Complete",
       description: "Your scan report has been downloaded successfully.",
     });
-  } else if (result?.error) {
+  } else {
+    toast({
+      variant: "destructive",
+      title: "Download Failed",
+      description: result?.error || "An unknown error occurred.",
+    });
+  }
+};
+
+/**
+ * Generic function to download a file from base64 data
+ */
+const downloadFile = async (
+  result: any,
+  outputType: string,
+  successMessage: string,
+  toast: ReturnType<typeof useToast>["toast"],
+): Promise<void> => {
+  if (result?.pending) {
+    toast({
+      title: "The report is still being generated",
+      description: "Please try again in a few minutes.",
+    });
+    return;
+  }
+
+  if (result?.success && result.data) {
+    try {
+      const binaryString = window.atob(result.data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const blob = new Blob([bytes], { type: outputType });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = result.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      toast({
+        title: "Download Complete",
+        description: successMessage,
+      });
+    } catch (_error) {
+      toast({
+        variant: "destructive",
+        title: "Download Failed",
+        description: "An error occurred while processing the file.",
+      });
+    }
+    return;
+  }
+
+  if (result?.error) {
     toast({
       variant: "destructive",
       title: "Download Failed",
       description: result.error,
     });
+    return;
   }
+
+  // Unexpected case
+  toast({
+    variant: "destructive",
+    title: "Download Failed",
+    description: "Unexpected response. Please try again later.",
+  });
 };
 
 export const downloadComplianceCsv = async (
   scanId: string,
   complianceId: string,
   toast: ReturnType<typeof useToast>["toast"],
-) => {
+): Promise<void> => {
   const result = await getComplianceCsv(scanId, complianceId);
+  await downloadFile(
+    result,
+    "text/csv",
+    "The compliance report has been downloaded successfully.",
+    toast,
+  );
+};
 
-  if (result?.success && result?.data) {
-    const binaryString = window.atob(result.data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    const blob = new Blob([bytes], { type: "text/csv" });
-
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = result.filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
-
-    toast({
-      title: "Download Complete",
-      description: "The compliance report has been downloaded successfully.",
-    });
-  } else if (result?.error) {
-    toast({
-      variant: "destructive",
-      title: "Download Failed",
-      description: result.error,
-    });
-  }
+/**
+ * Generic function to download a compliance PDF report (ThreatScore, ENS, etc.)
+ * @param scanId - The scan ID
+ * @param reportType - Type of report (from COMPLIANCE_REPORT_TYPES)
+ * @param toast - Toast notification function
+ */
+export const downloadComplianceReportPdf = async (
+  scanId: string,
+  reportType: ComplianceReportType,
+  toast: ReturnType<typeof useToast>["toast"],
+): Promise<void> => {
+  const result = await getCompliancePdfReport(scanId, reportType);
+  const reportName = COMPLIANCE_REPORT_DISPLAY_NAMES[reportType];
+  await downloadFile(
+    result,
+    "application/pdf",
+    `The ${reportName} PDF report has been downloaded successfully.`,
+    toast,
+  );
 };
 
 export const isGoogleOAuthEnabled =
@@ -136,17 +254,15 @@ export const isGithubOAuthEnabled =
   !!process.env.SOCIAL_GITHUB_OAUTH_CLIENT_ID &&
   !!process.env.SOCIAL_GITHUB_OAUTH_CLIENT_SECRET;
 
-export async function checkTaskStatus(
+export const checkTaskStatus = async (
   taskId: string,
-): Promise<{ completed: boolean; error?: string }> {
-  const MAX_RETRIES = 20; // Define the maximum number of attempts before stopping the polling
-  const RETRY_DELAY = 1000; // Delay time between each poll (in milliseconds)
-
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  maxRetries: number = 20,
+  retryDelay: number = 1500,
+): Promise<{ completed: boolean; error?: string }> => {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     const task = await getTask(taskId);
 
     if (task.error) {
-      // eslint-disable-next-line no-console
       console.error(`Error retrieving task: ${task.error}`);
       return { completed: false, error: task.error };
     }
@@ -162,7 +278,7 @@ export async function checkTaskStatus(
       case "scheduled":
       case "executing":
         // Continue waiting if the task is still in progress
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
         break;
       default:
         return { completed: false, error: "Unexpected task state" };
@@ -170,7 +286,7 @@ export async function checkTaskStatus(
   }
 
   return { completed: false, error: "Max retries exceeded" };
-}
+};
 
 export const wait = (ms: number) =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -213,19 +329,16 @@ export function decryptKey(passkey: string) {
   return atob(passkey);
 }
 
-export const getErrorMessage = async (error: unknown): Promise<string> => {
-  let message: string;
-
+export const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error) {
-    message = error.message;
+    return error.message;
   } else if (error && typeof error === "object" && "message" in error) {
-    message = String(error.message);
+    return String(error.message);
   } else if (typeof error === "string") {
-    message = error;
+    return error;
   } else {
-    message = "Oops! Something went wrong.";
+    return "Oops! Something went wrong.";
   }
-  return message;
 };
 
 export const permissionFormFields: PermissionInfo[] = [
@@ -251,12 +364,12 @@ export const permissionFormFields: PermissionInfo[] = [
     description:
       "Allows configuration and management of cloud provider connections",
   },
-  // {
-  //   field: "manage_integrations",
-  //   label: "Manage Integrations",
-  //   description:
-  //     "Controls the setup and management of third-party integrations",
-  // },
+  {
+    field: "manage_integrations",
+    label: "Manage Integrations",
+    description:
+      "Allows configuration and management of third-party integrations",
+  },
   {
     field: "manage_scans",
     label: "Manage Scans",

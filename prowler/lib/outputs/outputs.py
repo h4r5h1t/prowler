@@ -16,10 +16,26 @@ def stdout_report(finding, color, verbose, status, fix):
         details = finding.location.lower()
     if finding.check_metadata.Provider == "kubernetes":
         details = finding.namespace.lower()
+    if finding.check_metadata.Provider == "github":
+        details = finding.owner
     if finding.check_metadata.Provider == "m365":
+        details = finding.location
+    if finding.check_metadata.Provider == "mongodbatlas":
         details = finding.location
     if finding.check_metadata.Provider == "nhn":
         details = finding.location
+    if finding.check_metadata.Provider == "llm":
+        details = finding.check_metadata.CheckID
+    if finding.check_metadata.Provider == "iac":
+        details = finding.check_metadata.CheckID
+    if finding.check_metadata.Provider == "oraclecloud":
+        details = finding.region
+    if finding.check_metadata.Provider == "alibabacloud":
+        details = finding.region
+    if finding.check_metadata.Provider == "openstack":
+        details = finding.region
+    if finding.check_metadata.Provider == "cloudflare":
+        details = finding.zone_name
 
     if (verbose or fix) and (not status or finding.status in status):
         if finding.muted:

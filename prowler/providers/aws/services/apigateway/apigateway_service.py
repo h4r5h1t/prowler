@@ -1,7 +1,7 @@
 from typing import Optional
 
 from botocore.exceptions import ClientError
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 
 from prowler.lib.logger import logger
 from prowler.lib.scan_filters.scan_filters import is_resource_filtered
@@ -123,7 +123,10 @@ class APIGateway(AWSService):
                             waf = stage["webAclArn"]
                         if "methodSettings" in stage:
                             for settings in stage["methodSettings"].values():
-                                if settings.get("loggingLevel"):
+                                if (
+                                    settings.get("loggingLevel")
+                                    and settings.get("loggingLevel", "") != "OFF"
+                                ):
                                     logging = True
                                 if settings.get("cachingEnabled"):
                                     cache_enabled = True
@@ -224,11 +227,11 @@ class Stage(BaseModel):
     arn: str
     logging: bool
     client_certificate: bool
-    waf: Optional[str]
+    waf: Optional[str] = None
     tags: Optional[list] = []
-    tracing_enabled: Optional[bool]
-    cache_enabled: Optional[bool]
-    cache_data_encrypted: Optional[bool]
+    tracing_enabled: Optional[bool] = None
+    cache_enabled: Optional[bool] = None
+    cache_data_encrypted: Optional[bool] = None
 
 
 class PathResourceMethods(BaseModel):

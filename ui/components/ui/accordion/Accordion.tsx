@@ -1,12 +1,9 @@
 "use client";
 
-import {
-  Accordion as NextUIAccordion,
-  AccordionItem,
-  Selection,
-} from "@nextui-org/react";
+import { Accordion as NextUIAccordion, AccordionItem } from "@heroui/accordion";
+import type { Selection } from "@react-types/shared";
 import { ChevronDown } from "lucide-react";
-import React, { ReactNode, useCallback, useState } from "react";
+import React, { ReactNode, useCallback, useMemo, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -24,28 +21,42 @@ export interface AccordionProps {
   variant?: "light" | "shadow" | "bordered" | "splitted";
   className?: string;
   defaultExpandedKeys?: string[];
+  selectedKeys?: string[];
   selectionMode?: "single" | "multiple";
   isCompact?: boolean;
   showDivider?: boolean;
+  onItemExpand?: (key: string) => void;
+  onSelectionChange?: (keys: string[]) => void;
 }
 
 const AccordionContent = ({
   content,
   items,
+  selectedKeys,
+  onSelectionChange,
 }: {
   content: ReactNode;
   items?: AccordionItemProps[];
+  selectedKeys?: string[];
+  onSelectionChange?: (keys: string[]) => void;
 }) => {
+  // Normalize possible array content to automatically assign stable keys
+  const normalizedContent = Array.isArray(content)
+    ? React.Children.toArray(content)
+    : content;
+
   return (
     <div className="text-sm text-gray-700 dark:text-gray-300">
-      {content}
+      {normalizedContent}
       {items && items.length > 0 && (
-        <div className="ml-2 mt-4 border-l-2 border-gray-200 pl-4 dark:border-gray-700">
+        <div className="mt-4 ml-2 border-l-2 border-gray-200 pl-4 dark:border-gray-700">
           <Accordion
             items={items}
             variant="light"
             isCompact
             selectionMode="multiple"
+            selectedKeys={selectedKeys}
+            onSelectionChange={onSelectionChange}
           />
         </div>
       )}
@@ -58,21 +69,61 @@ export const Accordion = ({
   variant = "light",
   className,
   defaultExpandedKeys = [],
+  selectedKeys,
   selectionMode = "single",
   isCompact = false,
   showDivider = true,
+  onItemExpand,
+  onSelectionChange,
 }: AccordionProps) => {
-  const [expandedKeys, setExpandedKeys] = useState<Selection>(
+  // Determine if component is in controlled or uncontrolled mode
+  const isControlled = selectedKeys !== undefined;
+
+  const [internalExpandedKeys, setInternalExpandedKeys] = useState<Selection>(
     new Set(defaultExpandedKeys),
   );
 
-  const handleSelectionChange = useCallback((keys: Selection) => {
-    setExpandedKeys(keys);
-  }, []);
+  // Use selectedKeys if controlled, otherwise use internal state
+  const expandedKeys = useMemo(
+    () => (isControlled ? new Set(selectedKeys) : internalExpandedKeys),
+    [isControlled, selectedKeys, internalExpandedKeys],
+  );
+
+  const handleSelectionChange = useCallback(
+    (keys: Selection) => {
+      const keysArray = Array.from(keys as Set<string>);
+
+      // If controlled mode, call parent callback
+      if (isControlled && onSelectionChange) {
+        onSelectionChange(keysArray);
+      } else {
+        // If uncontrolled, update internal state
+        setInternalExpandedKeys(keys);
+      }
+
+      // Handle onItemExpand for backward compatibility
+      if (onItemExpand && keys !== expandedKeys) {
+        const currentKeys = Array.from(expandedKeys as Set<string>);
+        const newKeys = keysArray;
+
+        const newlyExpandedKeys = newKeys.filter(
+          (key) => !currentKeys.includes(key),
+        );
+
+        newlyExpandedKeys.forEach((key) => {
+          onItemExpand(key);
+        });
+      }
+    },
+    [expandedKeys, onItemExpand, isControlled, onSelectionChange],
+  );
 
   return (
     <NextUIAccordion
-      className={cn("w-full", className)}
+      className={cn(
+        "bg-bg-neutral-primary border-border-neutral-secondary w-full rounded-lg border",
+        className,
+      )}
       variant={variant}
       selectionMode={selectionMode}
       selectedKeys={expandedKeys}
@@ -91,15 +142,21 @@ export const Accordion = ({
           isDisabled={item.isDisabled}
           indicator={<ChevronDown className="text-gray-500" />}
           classNames={{
-            base: index === 0 || index === 1 ? "my-2" : "my-1",
-            title: "text-sm font-medium",
+            base: index === 0 || index === 1 ? "my-2" : "my-2",
+            title: "text-sm",
             subtitle: "text-xs text-gray-500",
             trigger:
-              "p-2 rounded-lg data-[hover=true]:bg-gray-50 dark:data-[hover=true]:bg-gray-800/50",
-            content: "p-2",
+              "py-2 px-2 rounded-lg data-[hover=true]:bg-bg-neutral-tertiary data-[open=true]:bg-bg-neutral-tertiary w-full flex items-center transition-colors",
+            content: "px-0 py-1",
           }}
         >
-          <AccordionContent content={item.content} items={item.items} />
+          <AccordionContent
+            key={`${item.key}-content`}
+            content={item.content}
+            items={item.items}
+            selectedKeys={selectedKeys}
+            onSelectionChange={onSelectionChange}
+          />
         </AccordionItem>
       ))}
     </NextUIAccordion>

@@ -78,6 +78,8 @@ def load_csv_files(csv_files):
                 result = result.replace("_KUBERNETES", " - KUBERNETES")
             if "M65" in result:
                 result = result.replace("_M65", " - M65")
+            if "ALIBABACLOUD" in result:
+                result = result.replace("_ALIBABACLOUD", " - ALIBABACLOUD")
             results.append(result)
 
     unique_results = set(results)
@@ -125,7 +127,7 @@ if data is None:
     )
 else:
 
-    data["ASSESSMENTDATE"] = pd.to_datetime(data["ASSESSMENTDATE"])
+    data["ASSESSMENTDATE"] = pd.to_datetime(data["ASSESSMENTDATE"], format="mixed")
     data["ASSESSMENT_TIME"] = data["ASSESSMENTDATE"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
     data_values = data["ASSESSMENT_TIME"].unique()
@@ -278,9 +280,18 @@ def display_data(
             data["REQUIREMENTS_ATTRIBUTES_PROFILE"] = data[
                 "REQUIREMENTS_ATTRIBUTES_PROFILE"
             ].apply(lambda x: x.split(" - ")[0])
+
+    # Rename the column LOCATION to REGION for Alibaba Cloud
+    if "alibabacloud" in analytics_input:
+        data = data.rename(columns={"LOCATION": "REGION"})
+
+    # Rename the column TENANCYID to ACCOUNTID for Oracle Cloud
+    if "oraclecloud" in analytics_input:
+        data.rename(columns={"TENANCYID": "ACCOUNTID"}, inplace=True)
+
     # Filter the chosen level of the CIS
     if is_level_1:
-        data = data[data["REQUIREMENTS_ATTRIBUTES_PROFILE"] == "Level 1"]
+        data = data[data["REQUIREMENTS_ATTRIBUTES_PROFILE"].str.contains("Level 1")]
 
     # Rename the column PROJECTID to ACCOUNTID for GCP
     if data.columns.str.contains("PROJECTID").any():
@@ -346,34 +357,27 @@ def display_data(
         if item == "nan" or item.__class__.__name__ != "str":
             region_filter_options.remove(item)
 
+    # Convert ASSESSMENTDATE to datetime
     data["ASSESSMENTDATE"] = pd.to_datetime(data["ASSESSMENTDATE"], errors="coerce")
-    data["ASSESSMENTDATE"] = data["ASSESSMENTDATE"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    data["ASSESSMENTDAY"] = data["ASSESSMENTDATE"].dt.date
 
-    # Choosing the date that is the most recent
-    data_values = data["ASSESSMENTDATE"].unique()
-    data_values.sort()
-    data_values = data_values[::-1]
-    aux = []
+    # Find the latest timestamp per account per day
+    latest_per_account_day = data.groupby(["ACCOUNTID", "ASSESSMENTDAY"])[
+        "ASSESSMENTDATE"
+    ].transform("max")
 
-    data_values = [str(i) for i in data_values]
-    for value in data_values:
-        if value.split(" ")[0] not in [aux[i].split(" ")[0] for i in range(len(aux))]:
-            aux.append(value)
-    data_values = [str(i) for i in aux]
+    # Keep only rows with the latest timestamp for each account and day
+    data = data[data["ASSESSMENTDATE"] == latest_per_account_day]
 
-    data = data[data["ASSESSMENTDATE"].isin(data_values)]
-    data["ASSESSMENTDATE"] = data["ASSESSMENTDATE"].apply(lambda x: x.split(" ")[0])
+    # Prepare the date filter options (unique days, as strings)
+    options_date = sorted(data["ASSESSMENTDAY"].astype(str).unique(), reverse=True)
 
-    options_date = data["ASSESSMENTDATE"].unique()
-    options_date.sort()
-    options_date = options_date[::-1]
-
-    # Filter DATE
+    # Filter by selected date (as string)
     if date_filter_analytics in options_date:
-        data = data[data["ASSESSMENTDATE"] == date_filter_analytics]
+        data = data[data["ASSESSMENTDAY"].astype(str) == date_filter_analytics]
     else:
         date_filter_analytics = options_date[0]
-        data = data[data["ASSESSMENTDATE"] == date_filter_analytics]
+        data = data[data["ASSESSMENTDAY"].astype(str) == date_filter_analytics]
 
     if data.empty:
         fig = px.pie()
@@ -408,9 +412,11 @@ def display_data(
             compliance_module = importlib.import_module(
                 f"dashboard.compliance.{current}"
             )
-            data = data.drop_duplicates(
-                subset=["CHECKID", "STATUS", "MUTED", "RESOURCEID", "STATUSEXTENDED"]
-            )
+            # Build subset list based on available columns
+            dedup_columns = ["CHECKID", "STATUS", "RESOURCEID", "STATUSEXTENDED"]
+            if "MUTED" in data.columns:
+                dedup_columns.insert(2, "MUTED")
+            data = data.drop_duplicates(subset=dedup_columns)
 
             if "threatscore" in analytics_input:
                 data = get_threatscore_mean_by_pillar(data)
@@ -651,58 +657,150 @@ def get_table(current_compliance, table):
 
 
 def get_threatscore_mean_by_pillar(df):
-    modified_df = df[df["STATUS"] == "FAIL"]
+    score_per_pillar = {}
+    max_score_per_pillar = {}
+    counted_findings_per_pillar = {}
 
-    modified_df["REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"] = pd.to_numeric(
-        modified_df["REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"], errors="coerce"
-    )
+    for _, row in df.iterrows():
+        pillar = (
+            row["REQUIREMENTS_ATTRIBUTES_SECTION"].split(" - ")[0]
+            if isinstance(row["REQUIREMENTS_ATTRIBUTES_SECTION"], str)
+            else "Unknown"
+        )
 
-    pillar_means = (
-        modified_df.groupby("REQUIREMENTS_ATTRIBUTES_SECTION")[
-            "REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"
-        ]
-        .mean()
-        .round(2)
-    )
+        if pillar not in score_per_pillar:
+            score_per_pillar[pillar] = 0
+            max_score_per_pillar[pillar] = 0
+            counted_findings_per_pillar[pillar] = set()
+
+        # Skip muted findings for score calculation
+        is_muted = "MUTED" in df.columns and row.get("MUTED") == "True"
+        if is_muted:
+            continue
+
+        # Create unique finding identifier to avoid counting duplicates
+        finding_id = f"{row.get('CHECKID', '')}_{row.get('RESOURCEID', '')}"
+        if finding_id in counted_findings_per_pillar[pillar]:
+            continue
+        counted_findings_per_pillar[pillar].add(finding_id)
+
+        level_of_risk = pd.to_numeric(
+            row["REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"], errors="coerce"
+        )
+        level_of_risk = 1 if pd.isna(level_of_risk) else level_of_risk
+
+        weight = 1
+        if "REQUIREMENTS_ATTRIBUTES_WEIGHT" in row and not pd.isna(
+            row["REQUIREMENTS_ATTRIBUTES_WEIGHT"]
+        ):
+            weight = pd.to_numeric(
+                row["REQUIREMENTS_ATTRIBUTES_WEIGHT"], errors="coerce"
+            )
+            weight = 1 if pd.isna(weight) else weight
+
+        max_score_per_pillar[pillar] += level_of_risk * weight
+
+        if row["STATUS"] == "PASS":
+            score_per_pillar[pillar] += level_of_risk * weight
 
     output = []
-    for pillar, mean in pillar_means.items():
-        output.append(f"{pillar} - [{mean}]")
+    for pillar in max_score_per_pillar:
+        risk_score = 0
+        if max_score_per_pillar[pillar] > 0:
+            risk_score = (score_per_pillar[pillar] / max_score_per_pillar[pillar]) * 100
+
+        output.append(f"{pillar} - [{risk_score:.1f}%]")
 
     for value in output:
-        if value.split(" - ")[0] in df["REQUIREMENTS_ATTRIBUTES_SECTION"].values:
+        base_pillar = value.split(" - ")[0]
+        if base_pillar in df["REQUIREMENTS_ATTRIBUTES_SECTION"].values:
             df.loc[
-                df["REQUIREMENTS_ATTRIBUTES_SECTION"] == value.split(" - ")[0],
+                df["REQUIREMENTS_ATTRIBUTES_SECTION"] == base_pillar,
                 "REQUIREMENTS_ATTRIBUTES_SECTION",
             ] = value
+
     return df
 
 
 def get_table_prowler_threatscore(df):
-    df = df[df["STATUS"] == "FAIL"]
+    score_per_pillar = {}
+    max_score_per_pillar = {}
+    pillars = {}
+    counted_findings_per_pillar = {}
+    counted_pass = set()
+    counted_fail = set()
+    counted_muted = set()
 
-    # Delete " - " from the column REQUIREMENTS_ATTRIBUTES_SECTION
-    df["REQUIREMENTS_ATTRIBUTES_SECTION"] = (
-        df["REQUIREMENTS_ATTRIBUTES_SECTION"].str.split(" - ").str[0]
-    )
+    df_copy = df.copy()
 
-    df["REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"] = pd.to_numeric(
-        df["REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"], errors="coerce"
-    )
-
-    score_df = (
-        df.groupby("REQUIREMENTS_ATTRIBUTES_SECTION")[
-            "REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"
-        ]
-        .mean()
-        .reset_index()
-        .rename(
-            columns={
-                "REQUIREMENTS_ATTRIBUTES_SECTION": "Pillar",
-                "REQUIREMENTS_ATTRIBUTES_LEVELOFRISK": "Score",
-            }
+    for _, row in df_copy.iterrows():
+        pillar = (
+            row["REQUIREMENTS_ATTRIBUTES_SECTION"].split(" - ")[0]
+            if isinstance(row["REQUIREMENTS_ATTRIBUTES_SECTION"], str)
+            else "Unknown"
         )
-    )
+
+        if pillar not in pillars:
+            pillars[pillar] = {"FAIL": 0, "PASS": 0, "MUTED": 0}
+            score_per_pillar[pillar] = 0
+            max_score_per_pillar[pillar] = 0
+            counted_findings_per_pillar[pillar] = set()
+
+        # Create unique finding identifier
+        finding_id = f"{row.get('CHECKID', '')}_{row.get('RESOURCEID', '')}"
+
+        # Check if muted
+        is_muted = "MUTED" in df_copy.columns and row.get("MUTED") == "True"
+
+        # Count muted findings (separate from score calculation)
+        if is_muted and finding_id not in counted_muted:
+            counted_muted.add(finding_id)
+            pillars[pillar]["MUTED"] += 1
+            continue  # Skip muted findings for score calculation
+
+        # Skip if already counted for this pillar
+        if finding_id in counted_findings_per_pillar[pillar]:
+            continue
+        counted_findings_per_pillar[pillar].add(finding_id)
+
+        level_of_risk = pd.to_numeric(
+            row["REQUIREMENTS_ATTRIBUTES_LEVELOFRISK"], errors="coerce"
+        )
+        level_of_risk = 1 if pd.isna(level_of_risk) else level_of_risk
+
+        weight = 1
+        if "REQUIREMENTS_ATTRIBUTES_WEIGHT" in row and not pd.isna(
+            row["REQUIREMENTS_ATTRIBUTES_WEIGHT"]
+        ):
+            weight = pd.to_numeric(
+                row["REQUIREMENTS_ATTRIBUTES_WEIGHT"], errors="coerce"
+            )
+            weight = 1 if pd.isna(weight) else weight
+
+        max_score_per_pillar[pillar] += level_of_risk * weight
+
+        if row["STATUS"] == "PASS":
+            if finding_id not in counted_pass:
+                counted_pass.add(finding_id)
+                pillars[pillar]["PASS"] += 1
+            score_per_pillar[pillar] += level_of_risk * weight
+        elif row["STATUS"] == "FAIL":
+            if finding_id not in counted_fail:
+                counted_fail.add(finding_id)
+                pillars[pillar]["FAIL"] += 1
+
+    result_df = []
+
+    for pillar in pillars.keys():
+        risk_score = 0
+        if max_score_per_pillar[pillar] > 0:
+            risk_score = (score_per_pillar[pillar] / max_score_per_pillar[pillar]) * 100
+
+        result_df.append({"Pillar": pillar, "Score": risk_score})
+
+    score_df = pd.DataFrame(result_df)
+
+    score_df = score_df.sort_values("Score", ascending=True)
 
     fig = px.bar(
         score_df,
@@ -710,22 +808,25 @@ def get_table_prowler_threatscore(df):
         y="Score",
         color="Score",
         color_continuous_scale=[
-            "#45cc6e",
-            "#f4d44d",
             "#e77676",
-        ],  # verde → amarillo → rojo
-        hover_data={"Score": True, "Pillar": True},
-        labels={"Score": "Average Risk Score", "Pillar": "Section"},
+            "#f4d44d",
+            "#45cc6e",
+        ],
+        labels={"Score": "Risk Score (%)", "Pillar": "Section"},
         height=400,
+        text="Score",
     )
+
+    fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
 
     fig.update_layout(
         xaxis_title="Pillar",
-        yaxis_title="Level of Risk",
+        yaxis_title="Risk Score (%)",
         margin=dict(l=20, r=20, t=30, b=20),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        coloraxis_colorbar=dict(title="Risk"),
+        coloraxis_colorbar=dict(title="Risk %"),
+        yaxis=dict(range=[0, 110]),
     )
 
     return dcc.Graph(

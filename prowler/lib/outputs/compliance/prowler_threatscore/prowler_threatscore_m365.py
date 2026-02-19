@@ -1,3 +1,4 @@
+from prowler.config.config import timestamp
 from prowler.lib.check.compliance_models import Compliance
 from prowler.lib.outputs.compliance.compliance_output import ComplianceOutput
 from prowler.lib.outputs.compliance.prowler_threatscore.models import (
@@ -46,7 +47,7 @@ class ProwlerThreatScoreM365(ComplianceOutput):
                             Description=compliance.Description,
                             TenantId=finding.account_uid,
                             Location=finding.region,
-                            AssessmentDate=str(finding.timestamp),
+                            AssessmentDate=str(timestamp),
                             Requirements_Id=requirement.Id,
                             Requirements_Description=requirement.Description,
                             Requirements_Attributes_Title=attribute.Title,
@@ -55,12 +56,15 @@ class ProwlerThreatScoreM365(ComplianceOutput):
                             Requirements_Attributes_AttributeDescription=attribute.AttributeDescription,
                             Requirements_Attributes_AdditionalInformation=attribute.AdditionalInformation,
                             Requirements_Attributes_LevelOfRisk=attribute.LevelOfRisk,
+                            Requirements_Attributes_Weight=attribute.Weight,
                             Status=finding.status,
                             StatusExtended=finding.status_extended,
                             ResourceId=finding.resource_uid,
                             ResourceName=finding.resource_name,
                             CheckId=finding.check_id,
                             Muted=finding.muted,
+                            Framework=compliance.Framework,
+                            Name=compliance.Name,
                         )
                         self._data.append(compliance_row)
         # Add manual requirements to the compliance output
@@ -72,7 +76,7 @@ class ProwlerThreatScoreM365(ComplianceOutput):
                         Description=compliance.Description,
                         TenantId="",
                         Location="",
-                        AssessmentDate=str(finding.timestamp),
+                        AssessmentDate=str(timestamp),
                         Requirements_Id=requirement.Id,
                         Requirements_Description=requirement.Description,
                         Requirements_Attributes_Title=attribute.Title,
@@ -81,11 +85,14 @@ class ProwlerThreatScoreM365(ComplianceOutput):
                         Requirements_Attributes_AttributeDescription=attribute.AttributeDescription,
                         Requirements_Attributes_AdditionalInformation=attribute.AdditionalInformation,
                         Requirements_Attributes_LevelOfRisk=attribute.LevelOfRisk,
+                        Requirements_Attributes_Weight=attribute.Weight,
                         Status="MANUAL",
                         StatusExtended="Manual check",
                         ResourceId="manual_check",
                         ResourceName="Manual check",
                         CheckId="manual",
                         Muted=False,
+                        Framework=compliance.Framework,
+                        Name=compliance.Name,
                     )
                     self._data.append(compliance_row)

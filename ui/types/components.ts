@@ -1,7 +1,7 @@
 import { LucideIcon } from "lucide-react";
-import { SVGProps } from "react";
+import { MouseEvent, SVGProps } from "react";
 
-import { ProviderType } from "./providers";
+import { ProviderCredentialFields } from "@/lib/provider-credentials/provider-credential-fields";
 
 export type IconSvgProps = SVGProps<SVGSVGElement> & {
   size?: number;
@@ -20,6 +20,8 @@ export type SubmenuProps = {
   label: string;
   active?: boolean;
   icon: IconComponent;
+  disabled?: boolean;
+  onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
 };
 
 export type MenuProps = {
@@ -29,6 +31,9 @@ export type MenuProps = {
   icon: IconComponent;
   submenus?: SubmenuProps[];
   defaultOpen?: boolean;
+  target?: string;
+  tooltip?: string;
+  highlight?: boolean;
 };
 
 export type GroupProps = {
@@ -44,34 +49,66 @@ export interface CollapseMenuButtonProps {
   isOpen: boolean | undefined;
 }
 
-export interface SelectScanComplianceDataProps {
-  scans: (ScanProps & {
-    providerInfo: {
-      provider: ProviderType;
-      uid: string;
-      alias: string;
-    };
-  })[];
-  selectedScanId: string;
-  onSelectionChange: (selectedKey: string) => void;
-}
-
+export const NEXT_UI_VARIANTS = {
+  SOLID: "solid",
+  FADED: "faded",
+  BORDERED: "bordered",
+  LIGHT: "light",
+  FLAT: "flat",
+  GHOST: "ghost",
+  SHADOW: "shadow",
+} as const;
 export type NextUIVariants =
-  | "solid"
-  | "faded"
-  | "bordered"
-  | "light"
-  | "flat"
-  | "ghost"
-  | "shadow";
+  (typeof NEXT_UI_VARIANTS)[keyof typeof NEXT_UI_VARIANTS];
 
-export type NextUIColors =
-  | "primary"
-  | "secondary"
-  | "success"
-  | "warning"
-  | "danger"
-  | "default";
+export const NEXT_UI_COLORS = {
+  PRIMARY: "primary",
+  SECONDARY: "secondary",
+  SUCCESS: "success",
+  WARNING: "warning",
+  DANGER: "danger",
+  DEFAULT: "default",
+} as const;
+export type NextUIColors = (typeof NEXT_UI_COLORS)[keyof typeof NEXT_UI_COLORS];
+
+export const PERMISSION_STATE = {
+  UNLIMITED: "unlimited",
+  LIMITED: "limited",
+  NONE: "none",
+} as const;
+export type PermissionState =
+  (typeof PERMISSION_STATE)[keyof typeof PERMISSION_STATE];
+
+export const FINDING_DELTA = {
+  NEW: "new",
+  CHANGED: "changed",
+} as const;
+export type FindingDelta =
+  | (typeof FINDING_DELTA)[keyof typeof FINDING_DELTA]
+  | null;
+
+export const FINDING_STATUS = {
+  PASS: "PASS",
+  FAIL: "FAIL",
+  MANUAL: "MANUAL",
+} as const;
+export type FindingStatus =
+  (typeof FINDING_STATUS)[keyof typeof FINDING_STATUS];
+
+export const SEVERITY = {
+  INFORMATIONAL: "informational",
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high",
+  CRITICAL: "critical",
+} as const;
+export type Severity = (typeof SEVERITY)[keyof typeof SEVERITY];
+
+export const USER_STATUS = {
+  ACTIVE: "active",
+  INACTIVE: "inactive",
+} as const;
+export type UserStatus = (typeof USER_STATUS)[keyof typeof USER_STATUS];
 
 export interface PermissionInfo {
   field: string;
@@ -85,9 +122,11 @@ export interface FindingsByStatusData {
     attributes: {
       fail: number;
       pass: number;
+      muted: number;
       total: number;
       fail_new: number;
       pass_new: number;
+      muted_new: number;
       [key: string]: number;
     };
   };
@@ -192,63 +231,122 @@ export interface TaskDetails {
     };
   };
 }
+export const AWS_CREDENTIALS_TYPE = {
+  AWS_SDK_DEFAULT: "aws-sdk-default",
+  ACCESS_SECRET_KEY: "access-secret-key",
+} as const;
+export type AWSCredentialsType =
+  (typeof AWS_CREDENTIALS_TYPE)[keyof typeof AWS_CREDENTIALS_TYPE];
+
 export type AWSCredentials = {
-  aws_access_key_id: string;
-  aws_secret_access_key: string;
-  aws_session_token: string;
-  secretName: string;
-  providerId: string;
+  [ProviderCredentialFields.AWS_ACCESS_KEY_ID]: string;
+  [ProviderCredentialFields.AWS_SECRET_ACCESS_KEY]: string;
+  [ProviderCredentialFields.AWS_SESSION_TOKEN]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
 };
 
 export type AWSCredentialsRole = {
-  role_arn: string;
-  aws_access_key_id?: string;
-  aws_secret_access_key?: string;
-  aws_session_token?: string;
-  external_id?: string;
-  role_session_name?: string;
-  session_duration?: number;
-  credentials_type?: "aws-sdk-default" | "access-secret-key";
+  [ProviderCredentialFields.ROLE_ARN]?: string;
+  [ProviderCredentialFields.AWS_ACCESS_KEY_ID]?: string;
+  [ProviderCredentialFields.AWS_SECRET_ACCESS_KEY]?: string;
+  [ProviderCredentialFields.AWS_SESSION_TOKEN]?: string;
+  [ProviderCredentialFields.EXTERNAL_ID]?: string;
+  [ProviderCredentialFields.ROLE_SESSION_NAME]?: string;
+  [ProviderCredentialFields.SESSION_DURATION]?: number;
+  [ProviderCredentialFields.CREDENTIALS_TYPE]?: AWSCredentialsType;
 };
 
 export type AzureCredentials = {
-  client_id: string;
-  client_secret: string;
-  tenant_id: string;
-  secretName: string;
-  providerId: string;
+  [ProviderCredentialFields.CLIENT_ID]: string;
+  [ProviderCredentialFields.CLIENT_SECRET]: string;
+  [ProviderCredentialFields.TENANT_ID]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
 };
 
-export type M365Credentials = {
-  client_id: string;
-  client_secret: string;
-  tenant_id: string;
-  user: string;
-  encrypted_password: string;
-  secretName: string;
-  providerId: string;
+export type M365ClientSecretCredentials = {
+  [ProviderCredentialFields.CLIENT_ID]: string;
+  [ProviderCredentialFields.CLIENT_SECRET]: string;
+  [ProviderCredentialFields.TENANT_ID]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
 };
 
-export type GCPCredentials = {
+export type M365CertificateCredentials = {
+  [ProviderCredentialFields.CLIENT_ID]: string;
+  [ProviderCredentialFields.CERTIFICATE_CONTENT]: string;
+  [ProviderCredentialFields.TENANT_ID]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type M365Credentials =
+  | M365ClientSecretCredentials
+  | M365CertificateCredentials;
+
+export type GCPDefaultCredentials = {
   client_id: string;
   client_secret: string;
   refresh_token: string;
-  secretName: string;
-  providerId: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type GCPServiceAccountKey = {
+  [ProviderCredentialFields.SERVICE_ACCOUNT_KEY]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
 };
 
 export type KubernetesCredentials = {
-  kubeconfig_content: string;
-  secretName: string;
-  providerId: string;
+  [ProviderCredentialFields.KUBECONFIG_CONTENT]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type IacCredentials = {
+  [ProviderCredentialFields.REPOSITORY_URL]: string;
+  [ProviderCredentialFields.ACCESS_TOKEN]?: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type OCICredentials = {
+  [ProviderCredentialFields.OCI_USER]: string;
+  [ProviderCredentialFields.OCI_FINGERPRINT]: string;
+  [ProviderCredentialFields.OCI_KEY_CONTENT]: string;
+  [ProviderCredentialFields.OCI_TENANCY]: string;
+  [ProviderCredentialFields.OCI_REGION]: string;
+  [ProviderCredentialFields.OCI_PASS_PHRASE]?: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type MongoDBAtlasCredentials = {
+  [ProviderCredentialFields.ATLAS_PUBLIC_KEY]: string;
+  [ProviderCredentialFields.ATLAS_PRIVATE_KEY]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type AlibabaCloudCredentials = {
+  [ProviderCredentialFields.ALIBABACLOUD_ACCESS_KEY_ID]: string;
+  [ProviderCredentialFields.ALIBABACLOUD_ACCESS_KEY_SECRET]: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
+};
+
+export type AlibabaCloudCredentialsRole = {
+  [ProviderCredentialFields.ALIBABACLOUD_ROLE_ARN]: string;
+  [ProviderCredentialFields.ALIBABACLOUD_ACCESS_KEY_ID]: string;
+  [ProviderCredentialFields.ALIBABACLOUD_ACCESS_KEY_SECRET]: string;
+  [ProviderCredentialFields.ALIBABACLOUD_ROLE_SESSION_NAME]?: string;
+  [ProviderCredentialFields.PROVIDER_ID]: string;
 };
 
 export type CredentialsFormSchema =
   | AWSCredentials
+  | AWSCredentialsRole
   | AzureCredentials
-  | GCPCredentials
+  | GCPDefaultCredentials
+  | GCPServiceAccountKey
   | KubernetesCredentials
-  | M365Credentials;
+  | IacCredentials
+  | M365Credentials
+  | OCICredentials
+  | MongoDBAtlasCredentials
+  | AlibabaCloudCredentials
+  | AlibabaCloudCredentialsRole;
 
 export interface SearchParamsProps {
   [key: string]: string | string[] | undefined;
@@ -262,53 +360,14 @@ export interface ApiError {
   };
   code: string;
 }
-export interface CompliancesOverview {
-  links: {
-    first: string;
-    last: string;
-    next: string | null;
-    prev: string | null;
-  };
-  data: ComplianceOverviewData[];
-  meta: {
-    pagination: {
-      page: number;
-      pages: number;
-      count: number;
-    };
-    version: string;
-  };
-}
 
-export interface ComplianceOverviewData {
-  type: "compliance-overviews";
-  id: string;
-  attributes: {
-    inserted_at: string;
-    compliance_id: string;
-    framework: string;
-    version: string;
-    requirements_status: {
-      passed: number;
-      failed: number;
-      manual: number;
-      total: number;
-    };
-    region: string;
-    provider_type: string;
-  };
-  relationships: {
-    scan: {
-      data: {
-        type: "scans";
-        id: string;
-      };
-    };
-  };
-  links: {
-    self: string;
-  };
-}
+export type ApiResponse = {
+  error?: string;
+  errors?: ApiError[];
+  data?: unknown;
+  success?: boolean;
+  status?: number;
+};
 
 export interface InvitationProps {
   type: "invitations";
@@ -341,7 +400,7 @@ export interface InvitationProps {
         manage_providers?: boolean;
         manage_integrations?: boolean;
         manage_scans?: boolean;
-        permission_state?: "unlimited" | "limited" | "none";
+        permission_state?: PermissionState;
       };
     };
   };
@@ -366,7 +425,7 @@ export interface Role {
     manage_integrations: boolean;
     manage_scans: boolean;
     unlimited_visibility: boolean;
-    permission_state: "unlimited" | "limited" | "none";
+    permission_state: PermissionState;
     inserted_at: string;
     updated_at: string;
   };
@@ -490,52 +549,9 @@ export interface UserProps {
   }[];
 }
 
-export interface ScanProps {
-  type: "scans";
-  id: string;
-  attributes: {
-    name: string;
-    trigger: "scheduled" | "manual";
-    state:
-      | "available"
-      | "scheduled"
-      | "executing"
-      | "completed"
-      | "failed"
-      | "cancelled";
-    unique_resource_count: number;
-    progress: number;
-    scanner_args: {
-      only_logs?: boolean;
-      excluded_checks?: string[];
-      aws_retries_max_attempts?: number;
-    } | null;
-    duration: number;
-    started_at: string;
-    inserted_at: string;
-    completed_at: string;
-    scheduled_at: string;
-    next_scan_at: string;
-  };
-  relationships: {
-    provider: {
-      data: {
-        id: string;
-        type: "providers";
-      };
-    };
-    task: {
-      data: {
-        id: string;
-        type: "tasks";
-      };
-    };
-  };
-  providerInfo?: {
-    provider: ProviderType;
-    uid: string;
-    alias: string;
-  };
+export interface FindingsResponse {
+  data: FindingProps[];
+  meta: MetaDataProps;
 }
 
 export interface FindingProps {
@@ -543,18 +559,19 @@ export interface FindingProps {
   id: string;
   attributes: {
     uid: string;
-    delta: "new" | "changed" | null;
-    status: "PASS" | "FAIL" | "MANUAL";
+    delta: FindingDelta;
+    status: FindingStatus;
     status_extended: string;
-    severity: "informational" | "low" | "medium" | "high" | "critical";
+    severity: Severity;
     check_id: string;
     muted: boolean;
+    muted_reason?: string;
     check_metadata: {
       risk: string;
       notes: string;
       checkid: string;
       provider: string;
-      severity: "informational" | "low" | "medium" | "high" | "critical";
+      severity: Severity;
       checktype: string[];
       dependson: string[];
       relatedto: string[];
@@ -575,6 +592,7 @@ export interface FindingProps {
           text: string;
         };
       };
+      additionalurls?: string[];
       servicename: string;
       checkaliases: string[];
       resourcetype: string;
@@ -630,6 +648,8 @@ export interface FindingProps {
         type: string;
         inserted_at: string;
         updated_at: string;
+        details: string | null;
+        partition: string | null;
       };
       relationships: {
         provider: {
@@ -702,5 +722,5 @@ export interface UserProps {
   name: string;
   role: string;
   dateAdded: string;
-  status: "active" | "inactive";
+  status: UserStatus;
 }

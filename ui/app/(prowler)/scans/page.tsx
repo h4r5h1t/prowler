@@ -1,103 +1,105 @@
-import { Spacer } from "@nextui-org/react";
 import { Suspense } from "react";
 
-import { getProvider, getProviders } from "@/actions/providers";
-import { getScans, getScansByState } from "@/actions/scans";
-import { FilterControls, filterScans } from "@/components/filters";
+import { getAllProviders } from "@/actions/providers";
+import { getScans } from "@/actions/scans";
+import { auth } from "@/auth.config";
+import { MutedFindingsConfigButton } from "@/components/providers";
 import {
-  AutoRefresh,
   NoProvidersAdded,
   NoProvidersConnected,
+  ScansFilters,
 } from "@/components/scans";
 import { LaunchScanWorkflow } from "@/components/scans/launch-workflow";
 import { SkeletonTableScans } from "@/components/scans/table";
-import { ColumnGetScans } from "@/components/scans/table/scans";
+import { ScansTableWithPolling } from "@/components/scans/table/scans";
 import { ContentLayout } from "@/components/ui";
-import { DataTable, DataTableFilterCustom } from "@/components/ui/table";
+import { CustomBanner } from "@/components/ui/custom/custom-banner";
+import {
+  createProviderDetailsMapping,
+  extractProviderUIDs,
+} from "@/lib/provider-helpers";
 import { ProviderProps, ScanProps, SearchParamsProps } from "@/types";
 
 export default async function Scans({
   searchParams,
 }: {
-  searchParams: SearchParamsProps;
+  searchParams: Promise<SearchParamsProps>;
 }) {
-  const filteredParams = { ...searchParams };
+  const session = await auth();
+  const resolvedSearchParams = await searchParams;
+  const filteredParams = { ...resolvedSearchParams };
   delete filteredParams.scanId;
-  const searchParamsKey = JSON.stringify(filteredParams);
 
-  const providersData = await getProviders({
-    filters: {
-      "filter[connected]": true,
-    },
-  });
+  const providersData = await getAllProviders();
 
   const providerInfo =
-    providersData?.data?.map((provider: ProviderProps) => ({
-      providerId: provider.id,
-      alias: provider.attributes.alias,
-      providerType: provider.attributes.provider,
-      uid: provider.attributes.uid,
-      connected: provider.attributes.connection.connected,
-    })) || [];
+    providersData?.data
+      ?.filter(
+        (provider: ProviderProps) =>
+          provider.attributes.connection.connected === true,
+      )
+      .map((provider: ProviderProps) => ({
+        providerId: provider.id,
+        alias: provider.attributes.alias,
+        providerType: provider.attributes.provider,
+        uid: provider.attributes.uid,
+        connected: provider.attributes.connection.connected,
+      })) || [];
 
-  const providersCountConnected = await getProviders({});
   const thereIsNoProviders =
-    !providersCountConnected?.data || providersCountConnected.data.length === 0;
+    !providersData?.data || providersData.data.length === 0;
 
-  const thereIsNoProvidersConnected = providersCountConnected?.data?.every(
+  const thereIsNoProvidersConnected = providersData?.data?.every(
     (provider: ProviderProps) => !provider.attributes.connection.connected,
   );
 
-  // Get scans data to check for executing scans
-  const scansData = await getScansByState();
+  const hasManageScansPermission = session?.user?.permissions?.manage_scans;
 
-  const hasExecutingScan = scansData?.data?.some(
-    (scan: ScanProps) =>
-      scan.attributes.state === "executing" ||
-      scan.attributes.state === "available",
-  );
+  // Extract provider UIDs and create provider details mapping for filtering
+  const providerUIDs = providersData ? extractProviderUIDs(providersData) : [];
+  const providerDetails = providersData
+    ? createProviderDetailsMapping(providerUIDs, providersData)
+    : [];
+
+  if (thereIsNoProviders) {
+    return (
+      <ContentLayout title="Scans" icon="lucide:timer">
+        <NoProvidersAdded />
+      </ContentLayout>
+    );
+  }
 
   return (
-    <>
-      {thereIsNoProviders && (
+    <ContentLayout title="Scans" icon="lucide:timer">
+      <>
         <>
-          <Spacer y={4} />
-          <NoProvidersAdded />
-        </>
-      )}
-
-      {!thereIsNoProviders && (
-        <>
-          {thereIsNoProvidersConnected ? (
-            <ContentLayout title="Scans" icon="lucide:scan-search">
-              <Spacer y={8} />
+          {!hasManageScansPermission ? (
+            <CustomBanner
+              title={"Access Denied"}
+              message={"You don't have permission to launch the scan."}
+            />
+          ) : thereIsNoProvidersConnected ? (
+            <>
               <NoProvidersConnected />
-              <Spacer y={8} />
-            </ContentLayout>
+            </>
           ) : (
-            <ContentLayout title="Scans" icon="lucide:scan-search">
-              <AutoRefresh hasExecutingScan={hasExecutingScan} />
-              <LaunchScanWorkflow providers={providerInfo} />
-              <Spacer y={8} />
-            </ContentLayout>
+            <LaunchScanWorkflow providers={providerInfo} />
           )}
-
-          <div className="grid grid-cols-12 items-start gap-4 px-6 py-4 sm:px-8 xl:px-10">
-            <div className="col-span-12">
-              <div className="flex flex-row items-center justify-between">
-                <DataTableFilterCustom filters={filterScans || []} />
-                <Spacer x={4} />
-                <FilterControls />
-              </div>
-              <Spacer y={8} />
-              <Suspense key={searchParamsKey} fallback={<SkeletonTableScans />}>
-                <SSRDataTableScans searchParams={searchParams} />
-              </Suspense>
-            </div>
-          </div>
         </>
-      )}
-    </>
+        <div className="flex flex-col gap-6">
+          <ScansFilters
+            providerUIDs={providerUIDs}
+            providerDetails={providerDetails}
+          />
+          <div className="flex items-center justify-end">
+            <MutedFindingsConfigButton />
+          </div>
+          <Suspense fallback={<SkeletonTableScans />}>
+            <SSRDataTableScans searchParams={resolvedSearchParams} />
+          </Suspense>
+        </div>
+      </>
+    </ContentLayout>
   );
 }
 
@@ -120,40 +122,53 @@ const SSRDataTableScans = async ({
   // Extract query from filters
   const query = (filters["filter[search]"] as string) || "";
 
-  // Fetch scans data
-  const scansData = await getScans({ query, page, sort, filters, pageSize });
+  // Fetch scans data with provider information included
+  const scansData = await getScans({
+    query,
+    page,
+    sort,
+    filters,
+    pageSize,
+    include: "provider",
+  });
 
-  // Handle expanded scans data
-  const expandedScansData = await Promise.all(
-    scansData?.data?.map(async (scan: any) => {
+  const scans = scansData?.data;
+  const included = scansData?.included;
+  const meta = scansData && "meta" in scansData ? scansData.meta : undefined;
+
+  const expandedScansData =
+    scans?.map((scan: ScanProps) => {
       const providerId = scan.relationships?.provider?.data?.id;
 
       if (!providerId) {
         return { ...scan, providerInfo: null };
       }
 
-      const formData = new FormData();
-      formData.append("id", providerId);
+      // Find the provider data in the included array
+      const providerData = included?.find(
+        (item: { type: string; id: string }) =>
+          item.type === "providers" && item.id === providerId,
+      );
 
-      const providerData = await getProvider(formData);
-
-      if (providerData?.data) {
-        const { provider, uid, alias } = providerData.data.attributes;
-        return {
-          ...scan,
-          providerInfo: { provider, uid, alias },
-        };
+      if (!providerData) {
+        return { ...scan, providerInfo: null };
       }
 
-      return { ...scan, providerInfo: null };
-    }) || [],
-  );
+      return {
+        ...scan,
+        providerInfo: {
+          provider: providerData.attributes.provider,
+          uid: providerData.attributes.uid,
+          alias: providerData.attributes.alias,
+        },
+      };
+    }) || [];
 
   return (
-    <DataTable
-      columns={ColumnGetScans}
-      data={expandedScansData || []}
-      metadata={scansData?.meta}
+    <ScansTableWithPolling
+      initialData={expandedScansData}
+      initialMeta={meta}
+      searchParams={searchParams}
     />
   );
 };

@@ -1,21 +1,26 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { apiBaseUrl, getAuthHeaders, getErrorMessage } from "@/lib";
 import {
-  apiBaseUrl,
-  getAuthHeaders,
-  getErrorMessage,
-  parseStringify,
-} from "@/lib";
-
+  COMPLIANCE_REPORT_DISPLAY_NAMES,
+  type ComplianceReportType,
+} from "@/lib/compliance/compliance-report-types";
+import {
+  appendSanitizedProviderTypeFilters,
+  sanitizeProviderTypesCsv,
+} from "@/lib/provider-filters";
+import { addScanOperation } from "@/lib/sentry-breadcrumbs";
+import { handleApiError, handleApiResponse } from "@/lib/server-actions-helper";
 export const getScans = async ({
   page = 1,
   query = "",
   sort = "",
   filters = {},
   pageSize = 10,
+  fields = {},
+  include = "",
 }) => {
   const headers = await getAuthHeaders({ contentType: false });
 
@@ -27,24 +32,20 @@ export const getScans = async ({
   if (pageSize) url.searchParams.append("page[size]", pageSize.toString());
   if (query) url.searchParams.append("filter[search]", query);
   if (sort) url.searchParams.append("sort", sort);
+  if (include) url.searchParams.append("include", include);
 
-  // Handle multiple filters
-  Object.entries(filters).forEach(([key, value]) => {
-    if (key !== "filter[search]") {
-      url.searchParams.append(key, String(value));
-    }
+  // Handle fields parameters
+  Object.entries(fields).forEach(([key, value]) => {
+    url.searchParams.append(`fields[${key}]`, String(value));
   });
 
+  appendSanitizedProviderTypeFilters(url, filters);
+
   try {
-    const scans = await fetch(url.toString(), {
-      headers,
-    });
-    const data = await scans.json();
-    const parsedData = parseStringify(data);
-    revalidatePath("/scans");
-    return parsedData;
+    const response = await fetch(url.toString(), { headers });
+
+    return handleApiResponse(response);
   } catch (error) {
-    // eslint-disable-next-line no-console
     console.error("Error fetching scans:", error);
     return undefined;
   }
@@ -52,31 +53,21 @@ export const getScans = async ({
 
 export const getScansByState = async () => {
   const headers = await getAuthHeaders({ contentType: false });
-
   const url = new URL(`${apiBaseUrl}/scans`);
-
   // Request only the necessary fields to optimize the response
   url.searchParams.append("fields[scans]", "state");
+  url.searchParams.append(
+    "filter[provider_type__in]",
+    sanitizeProviderTypesCsv(),
+  );
 
   try {
     const response = await fetch(url.toString(), {
       headers,
     });
 
-    if (!response.ok) {
-      try {
-        const errorData = await response.json();
-        throw new Error(errorData?.message || "Failed to fetch scans by state");
-      } catch {
-        throw new Error("Failed to fetch scans by state");
-      }
-    }
-
-    const data = await response.json();
-
-    return parseStringify(data);
+    return handleApiResponse(response);
   } catch (error) {
-    // eslint-disable-next-line no-console
     console.error("Error fetching scans by state:", error);
     return undefined;
   }
@@ -88,17 +79,13 @@ export const getScan = async (scanId: string) => {
   const url = new URL(`${apiBaseUrl}/scans/${scanId}`);
 
   try {
-    const scan = await fetch(url.toString(), {
+    const response = await fetch(url.toString(), {
       headers,
     });
-    const data = await scan.json();
-    const parsedData = parseStringify(data);
 
-    return parsedData;
+    return handleApiResponse(response);
   } catch (error) {
-    return {
-      error: getErrorMessage(error),
-    };
+    return handleApiError(error);
   }
 };
 
@@ -110,6 +97,11 @@ export const scanOnDemand = async (formData: FormData) => {
   if (!providerId) {
     return { error: "Provider ID is required" };
   }
+
+  addScanOperation("create", undefined, {
+    provider_id: String(providerId),
+    scan_name: scanName ? String(scanName) : undefined,
+  });
 
   const url = new URL(`${apiBaseUrl}/scans`);
 
@@ -135,23 +127,14 @@ export const scanOnDemand = async (formData: FormData) => {
       body: JSON.stringify(requestBody),
     });
 
-    if (!response.ok) {
-      try {
-        const errorData = await response.json();
-        throw new Error(errorData?.message || "Failed to start scan");
-      } catch {
-        throw new Error("Failed to start scan");
-      }
+    const result = await handleApiResponse(response, "/scans");
+    if (result?.data?.id) {
+      addScanOperation("start", result.data.id);
     }
-
-    const data = await response.json();
-
-    revalidatePath("/scans");
-    return parseStringify(data);
+    return result;
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error("Error starting scan:", error);
-    return { error: getErrorMessage(error) };
+    addScanOperation("create");
+    return handleApiError(error);
   }
 };
 
@@ -176,19 +159,9 @@ export const scheduleDaily = async (formData: FormData) => {
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Failed to schedule daily: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    revalidatePath("/scans");
-    return parseStringify(data);
+    return handleApiResponse(response, "/scans");
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error(error);
-    return {
-      error: getErrorMessage(error),
-    };
+    return handleApiError(error);
   }
 };
 
@@ -214,15 +187,10 @@ export const updateScan = async (formData: FormData) => {
         },
       }),
     });
-    const data = await response.json();
-    revalidatePath("/scans");
-    return parseStringify(data);
+
+    return handleApiResponse(response, "/scans");
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error(error);
-    return {
-      error: getErrorMessage(error),
-    };
+    return handleApiError(error);
   }
 };
 
@@ -236,10 +204,23 @@ export const getExportsZip = async (scanId: string) => {
       headers,
     });
 
+    if (response.status === 202) {
+      const json = await response.json();
+      const taskId = json?.data?.id;
+      const state = json?.data?.attributes?.state;
+      return {
+        pending: true,
+        state,
+        taskId,
+      };
+    }
+
     if (!response.ok) {
       const errorData = await response.json();
+
       throw new Error(
-        errorData?.errors?.[0]?.detail || "Failed to fetch report",
+        errorData?.errors?.detail ||
+          "Unable to fetch scan report. Contact support if the issue continues.",
       );
     }
 
@@ -271,26 +252,86 @@ export const getComplianceCsv = async (
   );
 
   try {
-    const response = await fetch(url.toString(), {
-      headers,
-    });
+    const response = await fetch(url.toString(), { headers });
+
+    if (response.status === 202) {
+      const json = await response.json();
+      const taskId = json?.data?.id;
+      const state = json?.data?.attributes?.state;
+      return {
+        pending: true,
+        state,
+        taskId,
+      };
+    }
 
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(
-        errorData?.errors?.[0]?.detail || "Failed to fetch compliance report",
+        errorData?.errors?.detail ||
+          "Unable to retrieve compliance report. Contact support if the issue continues.",
       );
     }
 
-    // Get the blob data as an array buffer
     const arrayBuffer = await response.arrayBuffer();
-    // Convert to base64
     const base64 = Buffer.from(arrayBuffer).toString("base64");
 
     return {
       success: true,
       data: base64,
       filename: `scan-${scanId}-compliance-${complianceId}.csv`,
+    };
+  } catch (error) {
+    return {
+      error: getErrorMessage(error),
+    };
+  }
+};
+
+/**
+ * Generic function to get a compliance PDF report (ThreatScore, ENS, etc.)
+ * @param scanId - The scan ID
+ * @param reportType - Type of report (from COMPLIANCE_REPORT_TYPES)
+ * @returns Promise with the PDF data or error
+ */
+export const getCompliancePdfReport = async (
+  scanId: string,
+  reportType: ComplianceReportType,
+) => {
+  const headers = await getAuthHeaders({ contentType: false });
+
+  const url = new URL(`${apiBaseUrl}/scans/${scanId}/${reportType}`);
+
+  try {
+    const response = await fetch(url.toString(), { headers });
+
+    if (response.status === 202) {
+      const json = await response.json();
+      const taskId = json?.data?.id;
+      const state = json?.data?.attributes?.state;
+      return {
+        pending: true,
+        state,
+        taskId,
+      };
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      const reportName = COMPLIANCE_REPORT_DISPLAY_NAMES[reportType];
+      throw new Error(
+        errorData?.errors?.detail ||
+          `Unable to retrieve ${reportName} PDF report. Contact support if the issue continues.`,
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString("base64");
+
+    return {
+      success: true,
+      data: base64,
+      filename: `scan-${scanId}-${reportType}.pdf`,
     };
   } catch (error) {
     return {

@@ -1,12 +1,11 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from api.compliance import (
+    generate_compliance_overview_template,
+    generate_scan_compliance,
     get_prowler_provider_checks,
     get_prowler_provider_compliance,
-    load_prowler_compliance,
     load_prowler_checks,
-    generate_scan_compliance,
-    generate_compliance_overview_template,
 )
 from api.models import Provider
 
@@ -34,55 +33,6 @@ class TestCompliance:
         compliance_data = get_prowler_provider_compliance(provider_type)
         assert compliance_data == mock_compliance.get_bulk.return_value
         mock_compliance.get_bulk.assert_called_once_with(provider_type)
-
-    @patch("api.models.Provider.ProviderChoices")
-    @patch("api.compliance.get_prowler_provider_compliance")
-    @patch("api.compliance.generate_compliance_overview_template")
-    @patch("api.compliance.load_prowler_checks")
-    def test_load_prowler_compliance(
-        self,
-        mock_load_prowler_checks,
-        mock_generate_compliance_overview_template,
-        mock_get_prowler_provider_compliance,
-        mock_provider_choices,
-    ):
-        mock_provider_choices.values = ["aws", "azure"]
-
-        compliance_data_aws = {"compliance_aws": MagicMock()}
-        compliance_data_azure = {"compliance_azure": MagicMock()}
-
-        compliance_data_dict = {
-            "aws": compliance_data_aws,
-            "azure": compliance_data_azure,
-        }
-
-        def mock_get_compliance(provider_type):
-            return compliance_data_dict[provider_type]
-
-        mock_get_prowler_provider_compliance.side_effect = mock_get_compliance
-
-        mock_generate_compliance_overview_template.return_value = {
-            "template_key": "template_value"
-        }
-
-        mock_load_prowler_checks.return_value = {"checks_key": "checks_value"}
-
-        load_prowler_compliance()
-
-        from api.compliance import PROWLER_COMPLIANCE_OVERVIEW_TEMPLATE, PROWLER_CHECKS
-
-        assert PROWLER_COMPLIANCE_OVERVIEW_TEMPLATE == {
-            "template_key": "template_value"
-        }
-        assert PROWLER_CHECKS == {"checks_key": "checks_value"}
-
-        expected_prowler_compliance = compliance_data_dict
-        mock_get_prowler_provider_compliance.assert_any_call("aws")
-        mock_get_prowler_provider_compliance.assert_any_call("azure")
-        mock_generate_compliance_overview_template.assert_called_once_with(
-            expected_prowler_compliance
-        )
-        mock_load_prowler_checks.assert_called_once_with(expected_prowler_compliance)
 
     @patch("api.compliance.get_prowler_provider_checks")
     @patch("api.models.Provider.ProviderChoices")
@@ -218,6 +168,10 @@ class TestCompliance:
             Description="Description of requirement 1",
             Attributes=[],
             Checks=["check1", "check2"],
+            Tactics=["tactic1"],
+            SubTechniques=["subtechnique1"],
+            Platforms=["platform1"],
+            TechniqueURL="https://example.com",
         )
         requirement2 = MagicMock(
             Id="requirement2",
@@ -225,12 +179,17 @@ class TestCompliance:
             Description="Description of requirement 2",
             Attributes=[],
             Checks=[],
+            Tactics=[],
+            SubTechniques=[],
+            Platforms=[],
+            TechniqueURL="",
         )
         compliance1 = MagicMock(
             Requirements=[requirement1, requirement2],
             Framework="Framework 1",
             Version="1.0",
             Description="Description of compliance1",
+            Name="Compliance 1",
         )
         prowler_compliance = {"aws": {"compliance1": compliance1}}
 
@@ -240,6 +199,7 @@ class TestCompliance:
             "aws": {
                 "compliance1": {
                     "framework": "Framework 1",
+                    "name": "Compliance 1",
                     "version": "1.0",
                     "provider": "aws",
                     "description": "Description of compliance1",
@@ -247,6 +207,10 @@ class TestCompliance:
                         "requirement1": {
                             "name": "Requirement 1",
                             "description": "Description of requirement 1",
+                            "tactics": ["tactic1"],
+                            "subtechniques": ["subtechnique1"],
+                            "platforms": ["platform1"],
+                            "technique_url": "https://example.com",
                             "attributes": [],
                             "checks": {"check1": None, "check2": None},
                             "checks_status": {
@@ -260,6 +224,10 @@ class TestCompliance:
                         "requirement2": {
                             "name": "Requirement 2",
                             "description": "Description of requirement 2",
+                            "tactics": [],
+                            "subtechniques": [],
+                            "platforms": [],
+                            "technique_url": "",
                             "attributes": [],
                             "checks": {},
                             "checks_status": {
@@ -268,7 +236,7 @@ class TestCompliance:
                                 "manual": 0,
                                 "total": 0,
                             },
-                            "status": "PASS",
+                            "status": "MANUAL",
                         },
                     },
                     "requirements_status": {

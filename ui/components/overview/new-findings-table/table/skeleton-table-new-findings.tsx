@@ -1,62 +1,36 @@
-import { Card, Skeleton } from "@nextui-org/react";
 import React from "react";
 
+import { Card } from "@/components/shadcn/card/card";
+import { Skeleton } from "@/components/shadcn/skeleton/skeleton";
+
 export const SkeletonTableNewFindings = () => {
+  const columns = 7;
+  const rows = 3;
+
   return (
-    <Card className="h-full w-full space-y-5 p-4" radius="sm">
+    <Card variant="base" padding="md" className="flex flex-col gap-4">
       {/* Table headers */}
-      <div className="hidden justify-between md:flex">
-        <Skeleton className="w-1/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
-        <Skeleton className="w-2/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
-        <Skeleton className="w-2/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
-        <Skeleton className="w-2/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
-        <Skeleton className="w-2/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
-        <Skeleton className="w-1/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
-        <Skeleton className="w-1/12 rounded-lg">
-          <div className="h-8 bg-default-200"></div>
-        </Skeleton>
+      <div className="flex gap-4">
+        {Array.from({ length: columns }).map((_, index) => (
+          <Skeleton
+            key={`header-${index}`}
+            className="h-8"
+            style={{ width: `${100 / columns}%` }}
+          />
+        ))}
       </div>
 
       {/* Table body */}
-      <div className="space-y-3">
-        {[...Array(3)].map((_, index) => (
-          <div
-            key={index}
-            className="flex flex-col items-center justify-between space-x-0 md:flex-row md:space-x-4"
-          >
-            <Skeleton className="mb-2 w-full rounded-lg md:mb-0 md:w-1/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
-            <Skeleton className="mb-2 w-full rounded-lg md:mb-0 md:w-2/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
-            <Skeleton className="mb-2 hidden rounded-lg sm:flex md:mb-0 md:w-2/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
-            <Skeleton className="mb-2 hidden rounded-lg sm:flex md:mb-0 md:w-2/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
-            <Skeleton className="mb-2 hidden rounded-lg sm:flex md:mb-0 md:w-2/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
-            <Skeleton className="mb-2 hidden rounded-lg sm:flex md:mb-0 md:w-1/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
-            <Skeleton className="mb-2 hidden rounded-lg sm:flex md:mb-0 md:w-1/12">
-              <div className="h-12 bg-default-300"></div>
-            </Skeleton>
+      <div className="flex flex-col gap-3">
+        {Array.from({ length: rows }).map((_, rowIndex) => (
+          <div key={`row-${rowIndex}`} className="flex gap-4">
+            {Array.from({ length: columns }).map((_, colIndex) => (
+              <Skeleton
+                key={`cell-${rowIndex}-${colIndex}`}
+                className="h-12"
+                style={{ width: `${100 / columns}%` }}
+              />
+            ))}
           </div>
         ))}
       </div>

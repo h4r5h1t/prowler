@@ -2,11 +2,12 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
-from rest_framework_json_api.serializers import ValidationError
 from tasks.tasks import perform_scheduled_scan_task
 
 from api.db_utils import rls_transaction
+from api.exceptions import ConflictException
 from api.models import Provider, Scan, StateChoices
+from tasks.jobs.attack_paths import db_utils as attack_paths_db_utils
 
 
 def schedule_provider_scan(provider_instance: Provider):
@@ -24,15 +25,9 @@ def schedule_provider_scan(provider_instance: Provider):
     if PeriodicTask.objects.filter(
         interval=schedule, name=task_name, task="scan-perform-scheduled"
     ).exists():
-        raise ValidationError(
-            [
-                {
-                    "detail": "There is already a scheduled scan for this provider.",
-                    "status": 400,
-                    "source": {"pointer": "/data/attributes/provider_id"},
-                    "code": "invalid",
-                }
-            ]
+        raise ConflictException(
+            detail="There is already a scheduled scan for this provider.",
+            pointer="/data/attributes/provider_id",
         )
 
     with rls_transaction(tenant_id):
@@ -44,6 +39,12 @@ def schedule_provider_scan(provider_instance: Provider):
             state=StateChoices.AVAILABLE,
             scheduled_at=datetime.now(timezone.utc),
         )
+
+    attack_paths_db_utils.create_attack_paths_scan(
+        tenant_id=tenant_id,
+        scan_id=str(scheduled_scan.id),
+        provider_id=provider_id,
+    )
 
     # Schedule the task
     periodic_task_instance = PeriodicTask.objects.create(
@@ -67,4 +68,5 @@ def schedule_provider_scan(provider_instance: Provider):
             "tenant_id": str(provider_instance.tenant_id),
             "provider_id": provider_id,
         },
+        countdown=5,  # Avoid race conditions between the worker and the database
     )
